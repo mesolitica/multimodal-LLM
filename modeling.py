@@ -98,53 +98,52 @@ class MM_LLMs(PreTrainedModel):
         attn_dropout = 0.1
         is_add_bias_kv = True
         is_add_zero_attn = True
-        self.temporal_self_attention = nn.MultiheadAttention(
-            config.image_config.projection_dim,
-            config.attention_heads,
-            dropout=attn_dropout,
-            add_bias_kv=is_add_bias_kv,
-            add_zero_attn=is_add_zero_attn
-        )
+        self.temporal_self_attention = nn.MultiheadAttention(config.image_config.projection_dim,
+                                                             config.attention_heads,
+                                                             dropout=attn_dropout,
+                                                             add_bias_kv=is_add_bias_kv,
+                                                             add_zero_attn=is_add_zero_attn)
 
-        self.audio_align_attention = nn.MultiheadAttention(
-            config.llm_config.hidden_size,
-            config.attention_heads * 2,
-            dropout=attn_dropout,
-            add_bias_kv=is_add_bias_kv,
-            add_zero_attn=is_add_zero_attn
-        )
+        self.video_align_attention = nn.MultiheadAttention(config.llm_config.hidden_size,
+                                                           config.attention_heads * 2,
+                                                           dropout=attn_dropout,
+                                                           add_bias_kv=is_add_bias_kv,
+                                                           add_zero_attn=is_add_zero_attn)
 
-        self.image_align_attention = nn.MultiheadAttention(
-            config.llm_config.hidden_size,
-            config.attention_heads * 2,
-            dropout=attn_dropout,
-            add_bias_kv=is_add_bias_kv,
-            add_zero_attn=is_add_zero_attn
-        )
+        self.audio_align_attention = nn.MultiheadAttention(config.llm_config.hidden_size,
+                                                           config.attention_heads * 2,
+                                                           dropout=attn_dropout,
+                                                           add_bias_kv=is_add_bias_kv,
+                                                           add_zero_attn=is_add_zero_attn)
 
-        self.transform_audio_to_hidden = nn.Linear(
-            config.audio_config.d_model,
-            config.llm_config.hidden_size
-        )
-        self.transform_image_to_hidden = nn.Linear(
-            config.image_config.projection_dim,
-            config.llm_config.hidden_size
-        )
+        self.image_align_attention = nn.MultiheadAttention(config.llm_config.hidden_size,
+                                                           config.attention_heads * 2,
+                                                           dropout=attn_dropout,
+                                                           add_bias_kv=is_add_bias_kv,
+                                                           add_zero_attn=is_add_zero_attn)
+
+        self.transform_audio_to_hidden = nn.Linear(config.audio_config.d_model,
+                                                   config.llm_config.hidden_size)
+        self.transform_image_to_hidden = nn.Linear(config.image_config.projection_dim,
+                                                   config.llm_config.hidden_size)
 
         self.project_image = nn.Conv1d(
             config.image_config.projection_dim,
             config.image_config.projection_dim,
             kernel_size=config.image_conv_kernel,
-            stride=config.image_conv_stride
-        )
+            stride=config.image_conv_stride)
         self.project_audio = nn.Conv1d(
             config.audio_config.d_model,
             config.audio_config.d_model,
             kernel_size=config.audio_conv_kernel,
-            stride=config.audio_conv_stride
-        )
+            stride=config.audio_conv_stride)
+
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         self.layer_norm = nn.LayerNorm(config.image_config.projection_dim)
+        self.softmax = nn.Softmax(dim=-1)
+
+        self.sigmoid = nn.Sigmoid()
 
         self.loss_fct = CrossEntropyLoss()
 
@@ -174,14 +173,12 @@ class MM_LLMs(PreTrainedModel):
                 max_new_tokens=128,
                 eos_token_id=2,
                 bos_token_id=1,
-                pad_token_id=32006
-            )
+                pad_token_id=32006)
             return generate_ids
         outputs = self.llm(
             inputs_embeds=text_embeddings,
             attention_mask=attention_mask,
-            labels=labels
-        )
+            labels=labels)
 
         return outputs
 
@@ -199,39 +196,58 @@ class MM_LLMs(PreTrainedModel):
 
         ingore_num = 0
 
-        # if audio_features is not None:
-        #     audio_starts = embed_tokens(inputs['audio_starts']).unsqueeze(1)
-        #     audio_ends = embed_tokens(inputs['audio_ends']).unsqueeze(1)
+        if audio_features is not None:
 
-        #     audio_features = self.project_audio(audio_features.transpose(1, 2).contiguous()).transpose(1, 2).contiguous()
+            audio_index = inputs['audio_index']
 
-        #     audio_features = self.transform_audio_to_hidden(audio_features)
+            audio_starts = embed_tokens(inputs['audio_starts']).unsqueeze(1)
+            audio_ends = embed_tokens(inputs['audio_ends']).unsqueeze(1)
 
-        #     max_count = most_frequent_element(inputs['audio_index'])
+            audio_features = self.project_audio(
+                audio_features.transpose(
+                    1, 2).contiguous()).transpose(
+                1, 2).contiguous()
 
-        #     seq_img = audio_features.shape[1]
-        #     dim = token_embeddings.shape[2]
+            audio_features = self.transform_audio_to_hidden(audio_features)
 
-        #     new_audio = torch.zeros(token_embeddings.shape[1], seq_img * max_count, dim)
-        #     current_dim = 0
-        #     for no, index in enumerate(inputs['audio_index']):
-        #         if no > 0 and inputs['audio_index'][no - 1] == index:
-        #             current_dim += 1
-        #         else:
-        #             current_dim = 0
-        #         new_audio[index, current_dim * seq_img: (current_dim + 1) * seq_img] = audio_features[no]
-        #         last_index = inputs['audio_index'][0]
+            max_count = most_frequent_element(audio_index)
 
-        #     audio_features = self.audio_align_attention(new_audio.transpose(0, 1),
-        #     token_embeddings, token_embeddings)[0].transpose(0, 1).contiguous()
+            seq_img = audio_features.shape[1]
+            dim = token_embeddings.shape[2]
 
-        #     audio_inputs = torch.cat([torch.cat([audio_starts, audio_features], dim=1), audio_ends], dim=1)
+            new_audio = torch.zeros(
+                (token_embeddings.shape[1],
+                 seq_img * max_count),
+                dim,
+                device=token_embeddings.device,
+                dtype=token_embeddings.dtype)
+            current_dim = 0
+            for no, index in enumerate(audio_index):
+                if no > 0 and audio_index[no - 1] == index:
+                    current_dim += 1
+                else:
+                    current_dim = 0
+                new_audio[index, current_dim *
+                          seq_img: (current_dim + 1) * seq_img] = audio_features[no]
+                last_index = audio_index[0]
 
-        #     text_embeddings = torch.cat(
-        #         [torch.cat([text_embeddings[:, 0, :].unsqueeze(1), audio_inputs], dim=1), text_embeddings[:, 1:, :]],
-        #         dim=1)
+            audio_features = self.audio_align_attention(
+                new_audio.transpose(
+                    0,
+                    1),
+                token_embeddings,
+                token_embeddings)[0].transpose(
+                0,
+                1).contiguous()
 
-        #     ingore_num += (audio_inputs.size(1))
+            audio_inputs = torch.cat(
+                [torch.cat([audio_starts, audio_features], dim=1), audio_ends], dim=1)
+
+            text_embeddings = torch.cat(
+                [torch.cat([text_embeddings[:, 0, :].unsqueeze(1), audio_inputs], dim=1), text_embeddings[:, 1:, :]],
+                dim=1)
+
+            ingore_num += (audio_inputs.size(1))
 
         if image_features is not None:
 
@@ -253,10 +269,12 @@ class MM_LLMs(PreTrainedModel):
             dim = token_embeddings.shape[2]
 
             new_img = torch.zeros(
-                token_embeddings.shape[1],
-                seq_img *
-                max_count).device(
-                image_features.device)
+                (token_embeddings.shape[1],
+                 seq_img * max_count,
+                 dim),
+                device=token_embeddings.device,
+                dtype=token_embeddings.dtype)
+
             current_dim = 0
             for no, index in enumerate(img_index):
                 if no > 0 and img_index[no - 1] == index:
