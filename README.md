@@ -2,7 +2,10 @@
 
 Multi-Modal Language Modeling with Image, Audio and Text Integration, included multi-images and multi-audio in a single multiturn.
 
-**We are still experimenting embedding positions for multi-images and multi-audio during multiturn conversation**.
+## The goal
+
+1. We want in one turn, user can feed multi-images or multi-audio.
+2. In multi-turn, at N position, user can feed an image / an audio, and at N + k position, user can feed another an image or an audio.
 
 ## dataset
 

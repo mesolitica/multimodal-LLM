@@ -18,7 +18,6 @@
 import os
 import logging
 import math
-import os
 import sys
 from dataclasses import dataclass, field
 from itertools import chain
@@ -28,7 +27,7 @@ import datasets
 import evaluate
 import torch
 from datasets import load_dataset
-
+import librosa
 import transformers
 from transformers import (
     CONFIG_MAPPING,
@@ -43,58 +42,26 @@ from transformers import (
     is_torch_tpu_available,
     set_seed,
 )
-from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
-# xxx: 2023-03-21
 import copy
-
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
-from torch.utils.data.distributed import DistributedSampler
 from transformers import CLIPProcessor, CLIPModel, AutoTokenizer, AutoProcessor, CLIPConfig, LlamaConfig, WhisperConfig, WhisperModel, LlamaModel, LlamaTokenizer
 from transformers import AutoConfig, AutoModel
-import torch.distributed as dist
-from torch.nn import CrossEntropyLoss
 from transformers import Trainer
 import argparse
-import sklearn.metrics as metric
-import glob
-import logging
-import os
 import random
 import numpy as np
 import json
-import pickle
-import codecs
 from collections.abc import Mapping
 from PIL import Image
-from peft import PeftModel
 import os
-from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
-try:
-    from torchvision.transforms import InterpolationMode
-    BICUBIC = InterpolationMode.BICUBIC
-except ImportError:
-    BICUBIC = Image.BICUBIC
 from tqdm import tqdm, trange
-from sklearn.metrics import top_k_accuracy_score
-from transformers import (
-    WEIGHTS_NAME,
-    AdamW,
-    get_linear_schedule_with_warmup,
-)
 import os
-
 from modeling import MM_LLMs, MM_LLMs_Config
-import clip
-import whisper
 import torch
-
-
-def json_load(x): return json.load(codecs.open(x, 'r', encoding='utf-8'))
-def json_dump(d, p): return json.dump(d, codecs.open(p, 'w', 'utf-8'), indent=2, ensure_ascii=False)
+from typing import Mapping, Union, List, Dict
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -120,30 +87,26 @@ def preprocessor_new(
     return base_string
 
 
-import torch
-from typing import Mapping
-import numpy as np
+class DataCollator():
 
+    def __init__(self, tokenizer):
 
-class DataCollator:
+        self.tokenizer = tokenizer
 
-    tokenizer: AutoTokenizer
-    audio_processor: AutoProcessor
-    padding: Union[bool, str] = "longest"
-    pad_to_multiple_of: Optional[int] = None
-    pad_to_multiple_of_labels: Optional[int] = None
+    def __call__(self, features):
 
-    def __call__(
-            self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        if not isinstance(features[0], Mapping):
+            features = [vars(f) for f in features]
 
+        batch = {}
         bs = len(features)
+        first = features[0]
 
         batch['audio_index'] = torch.tensor([], dtype=torch.int)
         batch['image_index'] = torch.tensor([], dtype=torch.int)
-        batch["labels"] = torch.tensor([f["label"] for f in features], dtype=dtype)
 
         for index, feature in enumerate(features):
-            local_index = index % (bs // torch.cuda.device_count())
+            local_index = index % (bs // torch.cuda.device_count()) if bs > 1 else index % (bs)
             if first['audios'] is not None:
                 batch['audio_index'] = torch.cat([batch['audio_index'], torch.tensor(
                     [local_index] * len(feature['audios']), dtype=torch.int)])
@@ -155,7 +118,7 @@ class DataCollator:
         # Handling of all other possible keys.
         for k, v in first.items():
 
-            if k not in ("label", "audios", "images") and not isinstance(v, str):
+            if k not in ("labels", "audios", "images") and not isinstance(v, str):
                 if v is None:
                     batch[k] = None
                 elif isinstance(v, torch.Tensor):
@@ -169,68 +132,15 @@ class DataCollator:
                     batch[k] = torch.cat([f[k] for f in features])
 
         batch['image_starts'] = torch.tensor(
-            [tokenizer.convert_tokens_to_ids('<image>')] * bs, dtype=torch.int)
+            [self.tokenizer.convert_tokens_to_ids('<image>')] * bs, dtype=torch.int)
         batch['image_ends'] = torch.tensor(
-            [tokenizer.convert_tokens_to_ids('</image>')] * bs, dtype=torch.int)
+            [self.tokenizer.convert_tokens_to_ids('</image>')] * bs, dtype=torch.int)
         batch['audio_starts'] = torch.tensor(
-            [tokenizer.convert_tokens_to_ids('<audio>')] * bs, dtype=torch.int)
+            [self.tokenizer.convert_tokens_to_ids('<audio>')] * bs, dtype=torch.int)
         batch['audio_ends'] = torch.tensor(
-            [tokenizer.convert_tokens_to_ids('</audio>')] * bs, dtype=torch.int)
+            [self.tokenizer.convert_tokens_to_ids('</audio>')] * bs, dtype=torch.int)
 
         return {'inputs': batch}
-
-
-def data_collator(features: Mapping):
-
-    if not isinstance(features[0], Mapping):
-        features = [vars(f) for f in features]
-
-    first = features[0]
-    batch = {}
-
-    bs = len(features)
-    batch['audio_index'] = torch.tensor([], dtype=torch.int)
-    batch['image_index'] = torch.tensor([], dtype=torch.int)
-
-    # Special handling.
-    if "label" in first and first["label"] is not None:
-        label = first["label"].item() if isinstance(
-            first["label"], torch.Tensor) else first["label"]
-        dtype = torch.long if isinstance(label, int) else torch.float
-        batch["labels"] = torch.tensor([f["label"] for f in features], dtype=dtype)
-
-    # Handling of all other possible keys.
-    for k, v in first.items():
-
-        if k not in ("label", "audios", "images") and not isinstance(v, str):
-            if v is None:
-                batch[k] = None
-            elif isinstance(v, torch.Tensor):
-                batch[k] = torch.stack([f[k] for f in features]).squeeze(1)
-            elif isinstance(v, np.ndarray):
-                batch[k] = torch.tensor(np.stack([f[k] for f in features])).squeeze(1)
-        else:
-            if v is None:
-                batch[k] = None
-            else:
-                batch[k] = torch.cat([f[k] for f in features])
-
-    for index, feature in enumerate(features):
-        local_index = index % (bs // torch.cuda.device_count())
-        if first['audios'] is not None:
-            batch['audio_index'] = torch.cat([batch['audio_index'], torch.tensor(
-                [local_index] * len(feature['audios']), dtype=torch.int)])
-
-        if first['images'] is not None:
-            batch['image_index'] = torch.cat([batch['image_index'], torch.tensor(
-                [local_index] * len(feature['images']), dtype=torch.int)])
-
-    # batch['image_starts'] = torch.tensor([tokenizer.convert_tokens_to_ids('<image>')] * bs, dtype=torch.int)
-    # batch['image_ends'] = torch.tensor([tokenizer.convert_tokens_to_ids('</image>')] * bs, dtype=torch.int)
-    # batch['audio_starts'] = torch.tensor([tokenizer.convert_tokens_to_ids('<audio>')] * bs, dtype=torch.int)
-    # batch['audio_ends'] = torch.tensor([tokenizer.convert_tokens_to_ids('</audio>')] * bs, dtype=torch.int)
-
-    return {'inputs': batch}
 
 
 @dataclass
@@ -264,13 +174,6 @@ class ModelArguments:
                 "The model checkpoint for weights initialization.Don't set if you want to train a model from scratch."
             )
         },
-    )
-
-    model_type: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "If training from scratch, pass a model type from the list: " +
-            ", ".join(MODEL_TYPES)},
     )
     config_overrides: Optional[str] = field(
         default=None, metadata={
@@ -528,6 +431,9 @@ def main():
         model.audio_encoder._requires_grad = False
 
     class MMDataset(torch.utils.data.Dataset):
+
+        # to do tak siap lagi, kamarul helping
+
         def __init__(self, model_args, folder):
             if folder.endswith('.json'):
                 with open(folder) as fopen:
@@ -535,7 +441,10 @@ def main():
             else:
                 self.dataset = LocalDataset(folder)
 
-            self.processor = AutoProcessor.from_pretrained(model_args.image_encoder_name_or_path)
+            self.image_processor = AutoProcessor.from_pretrained(
+                model_args.image_encoder_name_or_path)
+            self.audio_processor = AutoProcessor.from_pretrained(
+                model_args.audio_encoder_name_or_path)
             self.tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
 
         def __getitem__(self, idx):
@@ -544,7 +453,7 @@ def main():
 
             audio = librosa.load('../filter-audio/2-2027-16.mp3')[0]
 
-            audio_features = processor(audio, sampling_rate=16_000, return_tensors='pt')
+            audio_features = self.audio_processor(audio, sampling_rate=16_000, return_tensors='pt')
 
             image = Image.open(
                 os.path.join(
@@ -555,17 +464,25 @@ def main():
                     '/home/ubuntu/resepichenom.com-multiturn',
                     data['image']))
 
-            image_output = preprocess(image).unsqueeze(0)
-            image_output2 = preprocess(image2).unsqueeze(0)
+            image_output = self.image_processor(images=image, return_tensors='pt')['pixel_values']
+            image_output2 = self.image_processor(images=image2, return_tensors='pt')['pixel_values']
 
             image_output = torch.cat((image_output, image_output2), 0)
 
+            audio_output = torch.cat(
+                (audio_features['input_features'], audio_features['input_features']), 0)
+
             full_text = preprocessor_new(data['conversations'])
 
-            outputs = tokenizer(full_text, return_tensors='pt', max_length=50, padding="max_length")
+            outputs = tokenizer(
+                full_text,
+                return_tensors='pt',
+                max_length=2046,
+                padding="max_length")
 
             outputs['labels'] = outputs['input_ids'].clone()
-            outputs['audios'] = audio_features['input_features']
+
+            outputs['audios'] = audio_output
             outputs['images'] = image_output
 
             return outputs
@@ -573,7 +490,9 @@ def main():
         def __len__(self):
             return len(self.dataset)
 
-    train_dataset = MMDataset(data_args.train_file)
+    data_collator = DataCollator(tokenizer=tokenizer)
+
+    train_dataset = MMDataset(model_args, data_args.train_file)
 
     if training_args.local_rank == 0:
         for name, param in model.named_parameters():
@@ -604,7 +523,7 @@ def main():
         eval_dataset=None,
         tokenizer=tokenizer,
         # Data collator will default to DataCollatorWithPadding, so we change it.
-        data_collator=torch_default_data_collator,
+        data_collator=data_collator,
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics if training_args.do_eval
         and not is_torch_tpu_available() else None,
