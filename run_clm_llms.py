@@ -30,8 +30,6 @@ from datasets import load_dataset
 import librosa
 import transformers
 from transformers import (
-    CONFIG_MAPPING,
-    MODEL_FOR_CAUSAL_LM_MAPPING,
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -42,6 +40,8 @@ from transformers import (
     is_torch_tpu_available,
     set_seed,
 )
+from streaming.base.format.mds.encodings import Encoding, _encodings
+from streaming import LocalDataset
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
@@ -107,29 +107,28 @@ class DataCollator():
 
         for index, feature in enumerate(features):
             local_index = index % (bs // torch.cuda.device_count()) if bs > 1 else index % (bs)
-            if first['audios'] is not None:
+            if feature['audios'] is not None:
                 batch['audio_index'] = torch.cat([batch['audio_index'], torch.tensor(
                     [local_index] * len(feature['audios']), dtype=torch.int)])
 
-            if first['images'] is not None:
+            if feature['images'] is not None:
                 batch['image_index'] = torch.cat([batch['image_index'], torch.tensor(
                     [local_index] * len(feature['images']), dtype=torch.int)])
 
-        # Handling of all other possible keys.
         for k, v in first.items():
 
-            if k not in ("labels", "audios", "images") and not isinstance(v, str):
+            if k not in ("audios", "images") and not isinstance(v, str):
                 if v is None:
                     batch[k] = None
                 elif isinstance(v, torch.Tensor):
                     batch[k] = torch.stack([f[k] for f in features]).squeeze(1)
                 elif isinstance(v, np.ndarray):
                     batch[k] = torch.tensor(np.stack([f[k] for f in features])).squeeze(1)
-            else:
+            elif k in ("audios", "images"):
                 if v is None:
                     batch[k] = None
                 else:
-                    batch[k] = torch.cat([f[k] for f in features])
+                    batch[k] = torch.cat([f[k] for f in features if f[k] is not None])
 
         batch['image_starts'] = torch.tensor(
             [self.tokenizer.convert_tokens_to_ids('<image>')] * bs, dtype=torch.int)
@@ -358,12 +357,13 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    # print(training_args)
-
-    training_args.remove_unused_columns = False
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
-    tokenizer.add_tokens(["<image>", "</image>", "<pad>", "<audio>", "</audio>"])
-    tokenizer.padding_side = 'right'
+    tokenizer.pad_token = tokenizer.unk_token
+    tokenizer.add_bos_token = False
+    tokenizer.add_eos_token = False
+    tokenizer.padding_side = "right"
+    tokenizer.chat_template = """{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{% if message['content'] is not none and message['content'].strip() != '' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% endif %}{% elif message['role'] == 'assistant' %}{% if messages[loop.index0 - 1]['content'] is not none and messages[loop.index0 - 1]['content'].strip() != '' and message['content'] is not none and message['content'].strip() != '' %}{{ message['content'] + eos_token }}{% endif %}{% else %}{{ print('Unexpected role encountered:', message['role']) }}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"""
+    tokenizer.add_tokens(["<image>", "</image>", "<audio>", "</audio>"])
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
@@ -394,6 +394,21 @@ def main():
         f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}")
     logger.info(f"Training/evaluation parameters {training_args}")
 
+    # Detecting last checkpoint.
+    last_checkpoint = None
+    if os.path.isdir(
+            training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+        last_checkpoint = get_last_checkpoint(training_args.output_dir)
+        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+            raise ValueError(
+                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+                "Use --overwrite_output_dir to overcome."
+            )
+        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+            logger.info(
+                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
+                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch.")
+
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
@@ -409,16 +424,19 @@ def main():
         image_conv_stride=model_args.image_conv_stride,
         audio_conv_kernel=model_args.audio_conv_kernel,
         audio_conv_stride=model_args.audio_conv_stride,
-        clip_config=clip_config, whisper_config=whisper_config, llm_config=llm_config)
+        image_config=clip_config, audio_config=whisper_config, llm_config=llm_config)
 
     # load model separately
     model = MM_LLMs(config=model_config)
 
-    model.cuda()
+    image_processor = AutoProcessor.from_pretrained(model_args.image_encoder_name_or_path)
+    audio_processor = AutoProcessor.from_pretrained(model_args.audio_encoder_name_or_path)
 
-    model.image_encoder.from_pretrained(model_args.image_encoder_name_or_path)
-    model.audio_encoder.from_pretrained(model_args.audio_encoder_name_or_path)
-    model.llm.from_pretrained(model_args.model_name_or_path, ignore_mismatched_sizes=True)
+    model.image_encoder = model.image_encoder.from_pretrained(model_args.image_encoder_name_or_path)
+    model.audio_encoder = model.audio_encoder.from_pretrained(model_args.audio_encoder_name_or_path)
+    model.llm = model.llm.from_pretrained(model_args.model_name_or_path,
+                                          use_flash_attention_2=True,
+                                          torch_dtype=torch.bfloat16)
     model.llm.resize_token_embeddings(len(tokenizer))
 
     # freeze encoder model
@@ -430,60 +448,67 @@ def main():
         param.requires_grad = False
         model.audio_encoder._requires_grad = False
 
+    class ListOfDict(Encoding):
+        def encode(self, obj: List[dict]) -> bytes:
+            # Convert the list of dictionaries to a JSON-encoded string
+            json_str = json.dumps(obj)
+            return json_str.encode('utf-8')
+
+        def decode(self, data: bytes) -> List[dict]:
+
+            # Decode the JSON-encoded string back to a list of dictionaries
+            json_str = data.decode('utf-8')
+            return json.loads(json_str)
+
+    # Register the custom encoding for 'list_of_dict'
+    _encodings['list_of_dict'] = ListOfDict
+
     class MMDataset(torch.utils.data.Dataset):
 
-        # to do tak siap lagi, kamarul helping
-
-        def __init__(self, model_args, folder):
+        def __init__(self, folder):
             if folder.endswith('.json'):
                 with open(folder) as fopen:
                     self.dataset = json.load(fopen)
             else:
                 self.dataset = LocalDataset(folder)
 
-            self.image_processor = AutoProcessor.from_pretrained(
-                model_args.image_encoder_name_or_path)
-            self.audio_processor = AutoProcessor.from_pretrained(
-                model_args.audio_encoder_name_or_path)
-            self.tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
-
         def __getitem__(self, idx):
-
             data = self.dataset[idx]
+            audio_list = []
+            image_list = []
 
-            audio = librosa.load('../filter-audio/2-2027-16.mp3')[0]
+            for x in data['filename']:
+                if x.endswith('.mp3'):
+                    audio, _ = librosa.load(f'../filter-audio/{x.split("/")[-1]}', sr=16000)
 
-            audio_features = self.audio_processor(audio, sampling_rate=16_000, return_tensors='pt')
+                    audio_features = audio_processor(
+                        audio, sampling_rate=16_000, return_tensors='pt')
 
-            image = Image.open(
-                os.path.join(
-                    '/home/ubuntu/resepichenom.com-multiturn',
-                    data['image']))
-            image2 = Image.open(
-                os.path.join(
-                    '/home/ubuntu/resepichenom.com-multiturn',
-                    data['image']))
+                    audio_list.append(audio_features['input_features'])
 
-            image_output = self.image_processor(images=image, return_tensors='pt')['pixel_values']
-            image_output2 = self.image_processor(images=image2, return_tensors='pt')['pixel_values']
+                elif x.endswith('.jpg'):
+                    image = Image.open(x)
 
-            image_output = torch.cat((image_output, image_output2), 0)
+                    image_output = image_processor(
+                        images=image, return_tensors='pt')['pixel_values']
 
-            audio_output = torch.cat(
-                (audio_features['input_features'], audio_features['input_features']), 0)
+                    image_list.append(image_output)
 
-            full_text = preprocessor_new(data['conversations'])
+            full_text = tokenizer.apply_chat_template(data['conversations'], tokenize=False)
 
             outputs = tokenizer(
                 full_text,
                 return_tensors='pt',
-                max_length=2046,
-                padding="max_length")
+                truncation=True,
+                padding="max_length",
+                max_length=4096,
+                return_overflowing_tokens=False,
+                return_length=False)
 
             outputs['labels'] = outputs['input_ids'].clone()
 
-            outputs['audios'] = audio_output
-            outputs['images'] = image_output
+            outputs['audios'] = torch.cat(audio_list, dim=0) if audio_list else None
+            outputs['images'] = torch.cat(image_list, dim=0) if image_list else None
 
             return outputs
 
@@ -492,7 +517,7 @@ def main():
 
     data_collator = DataCollator(tokenizer=tokenizer)
 
-    train_dataset = MMDataset(model_args, data_args.train_file)
+    train_dataset = MMDataset(data_args.train_file)
 
     if training_args.local_rank == 0:
         for name, param in model.named_parameters():
@@ -532,14 +557,16 @@ def main():
     # Training
     if training_args.do_train:
         checkpoint = None
-        # if training_args.resume_from_checkpoint is not None:
-        #     checkpoint = training_args.resume_from_checkpoint
-        # elif last_checkpoint is not None:
-        #     checkpoint = last_checkpoint
+        if training_args.resume_from_checkpoint is not None:
+            checkpoint = training_args.resume_from_checkpoint
+        elif last_checkpoint is not None:
+            checkpoint = last_checkpoint
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
 
         # Saves the tokenizer too for easy upload
         trainer.save_model(output_dir=training_args.output_dir)
+        image_processor.save_pretrained(training_args.output_dir)
+        audio_processor.save_pretrained(training_args.output_dir)
 
         metrics = train_result.metrics
 

@@ -13,7 +13,7 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers import GenerationConfig
 from transformers import CLIPConfig, CLIPProcessor, CLIPModel
 from transformers import WhisperConfig, WhisperPreTrainedModel, WhisperModel
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, LlamaConfig
 
 
 def most_frequent_element(tensor):
@@ -30,10 +30,10 @@ class MM_LLMs_Config(PretrainedConfig):
 
     def __init__(self, attention_heads=8, image_conv_kernel=48, image_conv_stride=36,
                  audio_conv_kernel=240, audio_conv_stride=220,
-                 clip_config=None, whisper_config=None, llm_config=None, **kwargs):
+                 image_config=None, audio_config=None, llm_config=None, **kwargs):
 
-        self.image_config = clip_config
-        self.audio_config = whisper_config
+        self.image_config = image_config
+        self.audio_config = audio_config
         self.llm_config = llm_config
         self.attention_heads = attention_heads
         self.image_conv_kernel = image_conv_kernel
@@ -41,11 +41,18 @@ class MM_LLMs_Config(PretrainedConfig):
         self.audio_conv_kernel = audio_conv_kernel
         self.audio_conv_stride = audio_conv_stride
 
+        if isinstance(self.image_config, dict):
+            self.image_config = CLIPConfig.from_dict(self.image_config)
+        if isinstance(self.audio_config, dict):
+            self.audio_config = WhisperConfig.from_dict(self.audio_config)
+        if isinstance(self.llm_config, dict):
+            self.llm_config = LlamaConfig.from_dict(self.llm_config)
+
         self.hidden_size = max(
-            llm_config.hidden_size,
-            clip_config.projection_dim,
-            whisper_config.d_model,
-            clip_config.projection_dim)
+            self.llm_config.hidden_size,
+            self.image_config.projection_dim,
+            self.audio_config.d_model,
+        )
 
         super().__init__(**kwargs)
 
@@ -69,22 +76,11 @@ class MM_LLMs_Config(PretrainedConfig):
         output["model_type"] = self.__class__.model_type
         return output
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
-
-        clip_config = CLIPConfig.from_dict(config_dict['image_config'])
-        whisper_config = WhisperConfig.from_dict(config_dict['audio_config'])
-        llm_config = AutoConfig.from_dict(config_dict['llm_config'])
-
-        return cls(
-            clip_config=clip_config,
-            whisper_config=whisper_config,
-            llm_config=llm_config,
-            **kwargs)
-
 
 class MM_LLMs(PreTrainedModel):
+    config_class = MM_LLMs_Config
+    supports_gradient_checkpointing = True
+
     def __init__(self, config):
         super().__init__(config)
         self.config = config
@@ -103,12 +99,6 @@ class MM_LLMs(PreTrainedModel):
                                                              dropout=attn_dropout,
                                                              add_bias_kv=is_add_bias_kv,
                                                              add_zero_attn=is_add_zero_attn)
-
-        self.video_align_attention = nn.MultiheadAttention(config.llm_config.hidden_size,
-                                                           config.attention_heads * 2,
-                                                           dropout=attn_dropout,
-                                                           add_bias_kv=is_add_bias_kv,
-                                                           add_zero_attn=is_add_zero_attn)
 
         self.audio_align_attention = nn.MultiheadAttention(config.llm_config.hidden_size,
                                                            config.attention_heads * 2,
@@ -171,9 +161,9 @@ class MM_LLMs(PreTrainedModel):
             generate_ids = self.llm.generate(
                 inputs_embeds=text_embeddings,
                 max_new_tokens=128,
-                eos_token_id=2,
-                bos_token_id=1,
-                pad_token_id=32006)
+                eos_token_id=model.llm.config.eos_token_id,
+                bos_token_id=model.llm.config.bos_token_id,
+                pad_token_id=model.llm.config.pad_token_id)
             return generate_ids
         outputs = self.llm(
             inputs_embeds=text_embeddings,
@@ -217,8 +207,8 @@ class MM_LLMs(PreTrainedModel):
 
             new_audio = torch.zeros(
                 (token_embeddings.shape[1],
-                 seq_img * max_count),
-                dim,
+                 seq_img * max_count,
+                 dim),
                 device=token_embeddings.device,
                 dtype=token_embeddings.dtype)
             current_dim = 0
@@ -235,6 +225,10 @@ class MM_LLMs(PreTrainedModel):
                 new_audio.transpose(
                     0,
                     1),
+
+
+
+
                 token_embeddings,
                 token_embeddings)[0].transpose(
                 0,
