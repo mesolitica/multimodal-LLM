@@ -74,19 +74,6 @@ require_version(
 logger = logging.getLogger(__name__)
 
 
-def preprocessor_new(
-        sources) -> str:
-
-    base_string = ""
-    for convs in sources:
-        if convs["role"] == "user":
-            base_string += f"<s> [INST] {convs['content']} [/INST] "
-        else:
-            base_string += f"{convs['content']} </s>"
-
-    return base_string
-
-
 class DataCollator():
 
     def __init__(self, tokenizer):
@@ -139,7 +126,7 @@ class DataCollator():
         batch['audio_ends'] = torch.tensor(
             [self.tokenizer.convert_tokens_to_ids('</audio>')] * bs, dtype=torch.int)
 
-        return {'inputs': batch}
+        return batch
 
 
 @dataclass
@@ -240,17 +227,8 @@ class ModelArguments:
             "help": "The stride of the convolutional kernel for the image stream."
         },
     )
-    video_conv_kernel: Optional[int] = field(
-        default=36,
-        metadata={
-            "help": "The size of the convolutional kernel for the video stream."
-        },
-    )
-    video_conv_stride: Optional[int] = field(
-        default=30,
-        metadata={
-            "help": "The stride of the convolutional kernel for the video stream."
-        },
+    use_flash_attention2: Optional[bool] = field(
+        default=False
     )
     audio_conv_kernel: Optional[int] = field(
         default=240,
@@ -413,8 +391,8 @@ def main():
     set_seed(training_args.seed)
 
     # load model
-    clip_config = CLIPConfig.from_pretrained(model_args.image_encoder_name_or_path)
-    whisper_config = WhisperConfig.from_pretrained(model_args.audio_encoder_name_or_path)
+    image_config = AutoConfig.from_pretrained(model_args.image_encoder_name_or_path)
+    audio_config = AutoConfig.from_pretrained(model_args.audio_encoder_name_or_path)
     llm_config = AutoConfig.from_pretrained(model_args.model_name_or_path)
 
     model_config = MM_LLMs_Config(
@@ -424,7 +402,7 @@ def main():
         image_conv_stride=model_args.image_conv_stride,
         audio_conv_kernel=model_args.audio_conv_kernel,
         audio_conv_stride=model_args.audio_conv_stride,
-        image_config=clip_config, audio_config=whisper_config, llm_config=llm_config)
+        image_config=image_config, audio_config=audio_config, llm_config=llm_config)
 
     # load model separately
     model = MM_LLMs(config=model_config)
@@ -435,9 +413,12 @@ def main():
     model.image_encoder = model.image_encoder.from_pretrained(model_args.image_encoder_name_or_path)
     model.audio_encoder = model.audio_encoder.from_pretrained(model_args.audio_encoder_name_or_path)
     model.llm = model.llm.from_pretrained(model_args.model_name_or_path,
-                                          use_flash_attention_2=True,
+                                          use_flash_attention_2=model_args.use_flash_attention2,
                                           torch_dtype=torch.bfloat16)
+
     model.llm.resize_token_embeddings(len(tokenizer))
+
+    model.config.llm_config.vocab_size = len(tokenizer)
 
     # freeze encoder model
     for param in model.image_encoder.parameters():
