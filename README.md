@@ -9,7 +9,7 @@ Multi-Modal Language Modeling with Image, Audio and Text Integration, included m
 
 ## dataset
 
-We are from Malaysia, so our dataset focused on Malaysian context.
+We are from Malaysia, so our dataset focused on Malaysian context, but we will train bi-lingual.
 
 ### Audio instruction
 

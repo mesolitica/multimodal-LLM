@@ -208,7 +208,6 @@ class MM_LLMs(PreTrainedModel):
             text_embeddings.size(0), 1, 1).transpose(0, 1)
 
         ingore_num = 0
-        print(text_embeddings.shape)
 
         if audio_features is not None:
 
@@ -254,10 +253,6 @@ class MM_LLMs(PreTrainedModel):
 
             audio_inputs = torch.cat(
                 [torch.cat([audio_starts, audio_features], dim=1), audio_ends], dim=1)
-
-            print(text_embeddings[:, 0, :].unsqueeze(1))
-
-            print(audio_inputs)
 
             text_embeddings = torch.cat(
                 [torch.cat([text_embeddings[:, 0, :].unsqueeze(1), audio_inputs], dim=1), text_embeddings[:, 1:, :]],
