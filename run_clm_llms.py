@@ -96,7 +96,7 @@ class DataCollator():
         batch['image_index'] = torch.tensor([], dtype=torch.int)
 
         for index, feature in enumerate(features):
-            local_index = index % (bs // torch.cuda.device_count()) if bs > 1 else index % (bs)
+            local_index = index % (bs)
             if feature['audios'] is not None:
                 batch['audio_index'] = torch.cat([batch['audio_index'], torch.tensor(
                     [local_index] * len(feature['audios']), dtype=torch.int)])
@@ -305,7 +305,7 @@ class DataTrainingArguments:
                 "value if set.")}, )
     streaming: bool = field(default=False, metadata={"help": "Enable streaming mode"})
     block_size: Optional[int] = field(
-        default=None,
+        default=4096,
         metadata={
             "help": (
                 "Optional input sequence length after tokenization. "
@@ -329,10 +329,6 @@ class DataTrainingArguments:
     )
     keep_linebreaks: bool = field(
         default=True, metadata={"help": "Whether to keep line breaks when using TXT files or not."}
-    )
-    max_length: Optional[int] = field(
-        default=4096,
-        metadata={"help": "max length"},
     )
 
     def __post_init__(self):
@@ -448,7 +444,7 @@ def main():
         param.requires_grad = False
         model.audio_encoder._requires_grad = False
 
-    max_length = data_args.max_length
+    max_length = data_args.block_size
 
     class ListOfDict(Encoding):
         def encode(self, obj: List[dict]) -> bytes:
@@ -496,6 +492,22 @@ def main():
 
                         image_list.append(image_output)
 
+                if not len(audio_list):
+                    audio = np.zeros((self.sr * 10,))
+
+                    audio_features = audio_processor(
+                        audio, sampling_rate=self.sr, return_tensors='pt')
+
+                    audio_list.append(audio_features['input_features'])
+
+                if not len(image_list):
+                    image = np.zeros((3, 224, 224))
+
+                    image_output = image_processor(
+                        images=image, return_tensors='pt')['pixel_values']
+
+                    image_list.append(image_output)
+
                 full_text = tokenizer.apply_chat_template(data['conversations'], tokenize=False)
 
                 outputs = tokenizer(
@@ -522,26 +534,10 @@ def main():
 
     train_dataset = MMDataset(data_args.train_file)
 
-    if training_args.local_rank == 0:
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                print(name)
-
-    def preprocess_logits_for_metrics(logits, labels):
-        if isinstance(logits, tuple):
-            # Depending on the model and config, logits may contain extra tensors,
-            # like past_key_values, but logits always come first
-            logits = logits[0]
-        return logits.argmax(dim=-1)
-    metric = evaluate.load("accuracy")
-
-    def compute_metrics(eval_preds):
-        preds, labels = eval_preds
-        # preds have the same shape as the labels, after the argmax(-1) has been calculated
-        # by preprocess_logits_for_metrics but we need to shift the labels
-        labels = labels[:, 1:].reshape(-1)
-        preds = preds[:, :-1].reshape(-1)
-        return metric.compute(predictions=preds, references=labels)
+    # if training_args.local_rank == 0:
+    #     for name, param in model.named_parameters():
+    #         if param.requires_grad:
+    #             print(name)
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -552,9 +548,6 @@ def main():
         tokenizer=tokenizer,
         # Data collator will default to DataCollatorWithPadding, so we change it.
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics if training_args.do_eval
-        and not is_torch_tpu_available() else None,
     )
 
     # Training
