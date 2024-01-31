@@ -10,7 +10,7 @@ WANDB_PROJECT=multimodal-tinyllama \
 --gradient_accumulation_steps 1 \
 --num_train_epochs 3 \
 --save_strategy "steps" \
---save_steps 100 \
+--save_steps 50 \
 --save_total_limit 2 \
 --learning_rate 2e-5 \
 --logging_steps 1 \
