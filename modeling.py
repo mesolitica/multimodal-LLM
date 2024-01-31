@@ -251,6 +251,8 @@ class MM_LLMs(PreTrainedModel):
                 0,
                 1).contiguous()
 
+            audio_features = add_positional_encoding(audio_features)
+
             audio_inputs = torch.cat(
                 [torch.cat([audio_starts, audio_features], dim=1), audio_ends], dim=1)
 
@@ -303,6 +305,8 @@ class MM_LLMs(PreTrainedModel):
                 0,
                 1).contiguous()
 
+            image_features = add_positional_encoding(image_features)
+
             image_inputs = torch.cat(
                 [torch.cat([image_starts, image_features], dim=1), image_ends], dim=1)
 
@@ -352,3 +356,30 @@ class MM_LLMs(PreTrainedModel):
             self.image_encoder.vision_model(images)[0])[:, 1:, :]
 
         return image_features
+
+
+def create_positional_encoding(L, h):
+    # Create a tensor to store the position encoding
+    position_encoding = torch.zeros(L, h)
+
+    # Fill the position encoding tensor
+    for pos in range(L):
+        for i in range(0, h, 2):
+            div_term = torch.exp(torch.tensor(-(math.log(10000.0) / h * (2 * i))))
+            position_encoding[pos, i] = torch.sin(pos * div_term)
+            position_encoding[pos, i + 1] = torch.cos(pos * div_term)
+
+    return position_encoding
+
+
+def add_positional_encoding(tensor):
+    N, L, h = tensor.size()  # batch size, sequence length, and feature dimension
+
+    # Create position embedding tensor
+    position_embedding = create_positional_encoding(L, h).to(tensor.device).to(tensor.dtype)
+
+    # Expand position embedding to match input tensor dimensions
+    position_embedding = position_embedding.unsqueeze(0).expand(N, -1, -1)
+
+    # Add position embedding to the input tensor
+    return tensor + position_embedding

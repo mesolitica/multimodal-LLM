@@ -61,6 +61,7 @@ from tqdm import tqdm, trange
 import os
 from modeling import MM_LLMs, MM_LLMs_Config
 import torch
+from datasets import Audio
 from typing import Mapping, Union, List, Dict
 
 
@@ -81,6 +82,8 @@ class DataCollator():
         self.tokenizer = tokenizer
 
     def __call__(self, features):
+
+        features = [f for f in features if f is not None]
 
         if not isinstance(features[0], Mapping):
             features = [vars(f) for f in features]
@@ -104,7 +107,12 @@ class DataCollator():
 
         for k, v in first.items():
 
-            if k not in ("audios", "images") and not isinstance(v, str):
+            if k not in (
+                    "audios",
+                    "images",
+                    "input_ids",
+                    "attention_mask"
+            ) and not isinstance(v, str):
                 if v is None:
                     batch[k] = None
                 elif isinstance(v, torch.Tensor):
@@ -116,6 +124,13 @@ class DataCollator():
                     batch[k] = None
                 else:
                     batch[k] = torch.cat([f[k] for f in features if f[k] is not None])
+
+        input_ids = [{'input_ids': f['input_ids'][0]} for f in features]
+        input_ids = self.tokenizer.pad(input_ids)
+        batch['input_ids'] = input_ids['input_ids']
+        batch['attention_mask'] = input_ids['attention_mask']
+        batch['labels'] = input_ids['input_ids'].clone()
+        batch['labels'][batch['labels'] == 0] = -100
 
         batch['image_starts'] = torch.tensor(
             [self.tokenizer.convert_tokens_to_ids('<image>')] * bs, dtype=torch.int)
@@ -315,6 +330,10 @@ class DataTrainingArguments:
     keep_linebreaks: bool = field(
         default=True, metadata={"help": "Whether to keep line breaks when using TXT files or not."}
     )
+    max_length: Optional[int] = field(
+        default=4096,
+        metadata={"help": "max length"},
+    )
 
     def __post_init__(self):
         if self.streaming:
@@ -429,19 +448,17 @@ def main():
         param.requires_grad = False
         model.audio_encoder._requires_grad = False
 
+    max_length = data_args.max_length
+
     class ListOfDict(Encoding):
         def encode(self, obj: List[dict]) -> bytes:
-            # Convert the list of dictionaries to a JSON-encoded string
             json_str = json.dumps(obj)
             return json_str.encode('utf-8')
 
         def decode(self, data: bytes) -> List[dict]:
-
-            # Decode the JSON-encoded string back to a list of dictionaries
             json_str = data.decode('utf-8')
             return json.loads(json_str)
 
-    # Register the custom encoding for 'list_of_dict'
     _encodings['list_of_dict'] = ListOfDict
 
     class MMDataset(torch.utils.data.Dataset):
@@ -453,45 +470,50 @@ def main():
             else:
                 self.dataset = LocalDataset(folder)
 
+            self.sr = 16000
+            self.audio = Audio(sampling_rate=self.sr)
+
         def __getitem__(self, idx):
-            data = self.dataset[idx]
-            audio_list = []
-            image_list = []
+            try:
+                data = self.dataset[idx]
+                audio_list = []
+                image_list = []
 
-            for x in data['filename']:
-                if x.endswith('.mp3'):
-                    audio, _ = librosa.load(f'../filter-audio/{x.split("/")[-1]}', sr=16000)
+                for x in data['filename']:
+                    if x.endswith('.mp3'):
+                        audio = self.audio.decode_example(self.audio.encode_example(x))['array']
 
-                    audio_features = audio_processor(
-                        audio, sampling_rate=16_000, return_tensors='pt')
+                        audio_features = audio_processor(
+                            audio, sampling_rate=self.sr, return_tensors='pt')
 
-                    audio_list.append(audio_features['input_features'])
+                        audio_list.append(audio_features['input_features'])
 
-                elif x.endswith('.jpg'):
-                    image = Image.open(x)
+                    elif x.endswith('.jpg'):
+                        image = Image.open(x)
 
-                    image_output = image_processor(
-                        images=image, return_tensors='pt')['pixel_values']
+                        image_output = image_processor(
+                            images=image, return_tensors='pt')['pixel_values']
 
-                    image_list.append(image_output)
+                        image_list.append(image_output)
 
-            full_text = tokenizer.apply_chat_template(data['conversations'], tokenize=False)
+                full_text = tokenizer.apply_chat_template(data['conversations'], tokenize=False)
 
-            outputs = tokenizer(
-                full_text,
-                return_tensors='pt',
-                truncation=True,
-                padding="max_length",
-                max_length=4096,
-                return_overflowing_tokens=False,
-                return_length=False)
+                outputs = tokenizer(
+                    full_text,
+                    return_tensors='pt',
+                    truncation=True,
+                    max_length=max_length,
+                    return_overflowing_tokens=False,
+                    return_length=False
+                )
 
-            outputs['labels'] = outputs['input_ids'].clone()
+                outputs['audios'] = torch.cat(audio_list, dim=0) if audio_list else None
+                outputs['images'] = torch.cat(image_list, dim=0) if image_list else None
 
-            outputs['audios'] = torch.cat(audio_list, dim=0) if audio_list else None
-            outputs['images'] = torch.cat(image_list, dim=0) if image_list else None
-
-            return outputs
+                return outputs
+            except Exception as e:
+                print(e)
+                return None
 
         def __len__(self):
             return len(self.dataset)
