@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, defaultdict
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -80,23 +80,6 @@ class MM_LLMs(PreTrainedModel):
 
         self.llm = AutoModelForCausalLM.from_config(config.llm_config)
 
-        attn_dropout = 0.1
-        is_add_bias_kv = True
-        is_add_zero_attn = True
-
-        self.num_heads = config.attention_heads * 2
-        self.audio_align_attention = nn.MultiheadAttention(config.llm_config.hidden_size,
-                                                           self.num_heads,
-                                                           dropout=attn_dropout,
-                                                           add_bias_kv=is_add_bias_kv,
-                                                           add_zero_attn=is_add_zero_attn)
-
-        self.image_align_attention = nn.MultiheadAttention(config.llm_config.hidden_size,
-                                                           self.num_heads,
-                                                           dropout=attn_dropout,
-                                                           add_bias_kv=is_add_bias_kv,
-                                                           add_zero_attn=is_add_zero_attn)
-
         self.transform_audio_to_hidden = nn.Linear(config.audio_config.d_model,
                                                    config.llm_config.hidden_size)
         self.transform_image_to_hidden = nn.Linear(config.image_config.text_config.hidden_size,
@@ -118,7 +101,12 @@ class MM_LLMs(PreTrainedModel):
             self.config.image_config.text_config.hidden_size,
             bias=False)
 
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
         self.layer_norm = nn.LayerNorm(config.image_config.text_config.hidden_size)
+        self.softmax = nn.Softmax(dim=-1)
+
+        self.sigmoid = nn.Sigmoid()
 
         self.loss_fct = CrossEntropyLoss()
 
@@ -191,163 +179,83 @@ class MM_LLMs(PreTrainedModel):
             audios) if audios is not None else None
         embed_tokens = self.llm.model.embed_tokens
         text_embeddings = embed_tokens(input_ids)
-
-        token_embeddings = embed_tokens.weight.unsqueeze(0).repeat(
-            text_embeddings.size(0), 1, 1).transpose(0, 1)
+        batch_size = text_embeddings.shape[0]
+        seq_len = text_embeddings.shape[1]
+        embed_dim = text_embeddings.shape[2]
 
         ingore_num = 0
 
-        if audio_features is not None:
+        max_count_audio = most_frequent_element(audio_index)
+        max_count_image = most_frequent_element(image_index)
 
-            audio_starts = embed_tokens(audio_starts).unsqueeze(1)
+        audio_features = self.project_audio(
+            audio_features.transpose(
+                1, 2).contiguous()).transpose(
+            1, 2).contiguous()
+        audio_features = self.transform_audio_to_hidden(audio_features)
+        seq_audio = audio_features.shape[1]
 
-            audio_features = self.project_audio(
-                audio_features.transpose(
-                    1, 2).contiguous()).transpose(
-                1, 2).contiguous()
+        image_features = self.project_image(
+            image_features.transpose(
+                1, 2).contiguous()).transpose(
+            1, 2).contiguous()
+        image_features = self.transform_image_to_hidden(image_features)
+        seq_image = image_features.shape[1]
 
-            audio_features = self.transform_audio_to_hidden(audio_features)
+        new_len = text_embeddings.shape[1] + seq_audio * \
+            max_count_audio + seq_image * max_count_image
+        final_embedding = torch.zeros(
+            batch_size, new_len, embed_dim,
+            device=text_embeddings.device,
+            dtype=text_embeddings.dtype
+        )
+        final_embedding[:, :seq_len] = text_embeddings
+        final_attention_mask = torch.zeros(
+            batch_size, new_len,
+            device=attention_mask.device,
+            dtype=attention_mask.dtype
+        )
+        final_attention_mask[:, :seq_len] = attention_mask
+        final_labels = torch.zeros(
+            batch_size, new_len,
+            device=labels.device,
+            dtype=labels.dtype
+        )
+        final_labels[:, :seq_len] = labels
 
-            max_count = most_frequent_element(audio_index)
+        image_id = int(image_starts[0])
+        audio_id = int(audio_starts[0])
 
-            seq_img = audio_features.shape[1]
-            dim = token_embeddings.shape[2]
+        where_is = torch.where((input_ids == audio_id) | (input_ids == image_id))
+        positions = defaultdict(int)
+        b_image = 0
+        b_audio = 0
 
-            new_audio = torch.zeros(
-                (token_embeddings.shape[1],
-                 seq_img * max_count,
-                 dim),
-                device=token_embeddings.device,
-                dtype=token_embeddings.dtype)
-            new_audio_mask = torch.ones(
-                (
-                    token_embeddings.shape[1] * self.num_heads,
-                    seq_img * max_count,
-                    token_embeddings.shape[0]
-                ),
-                device=token_embeddings.device,
-                dtype=torch.bool)
-            current_dim = 0
-            for no, index in enumerate(audio_index):
-                if no > 0 and audio_index[no - 1] == index:
-                    current_dim += 1
-                else:
-                    current_dim = 0
-                new_audio[
-                    index, current_dim *
-                    seq_img: (current_dim + 1) * seq_img
-                ] = audio_features[no]
-                new_audio_mask[index * self.num_heads: (index + 1) * self.num_heads, current_dim *
-                               seq_img: (current_dim + 1) * seq_img] = 0
+        for i in range(len(where_is[0])):
+            b, k = where_is[0][i], where_is[1][i]
+            int_b = int(b)
+            l = int(input_ids[b, k])
+            if l == image_id:
+                f = image_features[b_image]
+                b_image += 1
+            if l == audio_id:
+                f = audio_features[b_audio]
+                b_audio += 1
+            c = torch.cat([final_embedding[b, :positions[int_b]], f, text_embeddings[b, k + 1:]])
+            ignore = torch.tensor([-100] * len(f), device=labels.device)
+            c_label = torch.cat([final_labels[b, :positions[int_b]], ignore, labels[b, k + 1:]])
 
-            audio_features = self.audio_align_attention(
-                new_audio.transpose(
-                    0,
-                    1),
-                token_embeddings,
-                token_embeddings,
-                attn_mask=new_audio_mask
-            )[0].transpose(
-                0,
-                1).contiguous()
-
-            audio_inputs = torch.cat([audio_starts, audio_features], dim=1)
-
-            text_embeddings = torch.cat(
-                [torch.cat([text_embeddings[:, 0, :].unsqueeze(1), audio_inputs], dim=1), text_embeddings[:, 1:, :]],
-                dim=1)
-
-            ingore_num += (audio_inputs.size(1))
-
-        if image_features is not None:
-
-            image_starts = embed_tokens(image_starts).unsqueeze(1)
-
-            image_features = self.project_image(
-                image_features.transpose(
-                    1, 2).contiguous()).transpose(
-                1, 2).contiguous()
-
-            image_features = self.transform_image_to_hidden(image_features)
-
-            max_count = most_frequent_element(image_index)
-
-            seq_img = image_features.shape[1]
-            dim = token_embeddings.shape[2]
-
-            new_img = torch.zeros(
-                (token_embeddings.shape[1],
-                 seq_img * max_count,
-                 dim),
-                device=token_embeddings.device,
-                dtype=token_embeddings.dtype)
-
-            new_img_mask = torch.ones(
-                (
-                    token_embeddings.shape[1] * self.num_heads,
-                    seq_img * max_count,
-                    token_embeddings.shape[0]
-                ),
-                device=token_embeddings.device,
-                dtype=torch.bool
-            )
-
-            current_dim = 0
-            for no, index in enumerate(image_index):
-                if no > 0 and image_index[no - 1] == index:
-                    current_dim += 1
-                else:
-                    current_dim = 0
-                new_img[index, current_dim *
-                        seq_img: (current_dim + 1) * seq_img] = image_features[no]
-                new_audio_mask[index * self.num_heads: (index + 1) * self.num_heads, current_dim *
-                               seq_img: (current_dim + 1) * seq_img] = 0
-
-            image_features = self.image_align_attention(
-                new_img.transpose(
-                    0,
-                    1),
-                token_embeddings,
-                token_embeddings,
-                attn_mask=new_img_mask,
-            )[0].transpose(
-                0,
-                1).contiguous()
-
-            image_inputs = torch.cat([image_starts, image_features], dim=1)
-
-            text_embeddings = torch.cat(
-                [torch.cat([text_embeddings[:, 0, :].unsqueeze(1), image_inputs], dim=1),
-                 text_embeddings[:, 1:, :]], dim=1)
-
-            ingore_num += (image_inputs.size(1))
-
-        if attention_mask is not None:
-            attentionmask = torch.tensor([1]*ingore_num*text_embeddings.size(0),
-                                         device=text_embeddings.device).view(text_embeddings.size(0), -1)
-            attentionmask = torch.cat([attentionmask, attention_mask], dim=1)
-        else:
-            attention_mask = None
-
-        if labels is not None:
-            labels_ = torch.tensor([-100]*ingore_num*text_embeddings.size(0),
-                                   device=text_embeddings.device).view(text_embeddings.size(0), -1)
-            labels = torch.cat([labels_, labels], dim=1)
-        else:
-            labels = None
-
-          # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
+            final_embedding[b, :len(c)] = c
+            final_attention_mask[b, :len(c)] = 1.0
+            final_labels[b, :len(c)] = c_label
+            positions[int_b] += len(f)
 
         model_inputs.update(
             {
-                "inputs_embeds": text_embeddings,
+                "inputs_embeds": final_embedding,
                 "use_cache": kwargs.get("use_cache"),
-                "attention_mask": attentionmask,
-                "labels": labels,
+                "attention_mask": final_attention_mask,
+                "labels": final_labels,
             }
         )
         return model_inputs
