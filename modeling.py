@@ -118,12 +118,6 @@ class MM_LLMs(PreTrainedModel):
             self.config.image_config.text_config.hidden_size,
             bias=False)
 
-        self.layer_norm = nn.LayerNorm(config.image_config.text_config.hidden_size)
-
-        self.loss_fct = CrossEntropyLoss()
-
-        self.init_weights()
-
     def forward(self,
                 input_ids: torch.LongTensor = None,
                 image_index: torch.LongTensor = None,

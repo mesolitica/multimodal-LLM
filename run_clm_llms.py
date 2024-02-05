@@ -56,10 +56,9 @@ import numpy as np
 import json
 from collections.abc import Mapping
 from PIL import Image
-import os
 from tqdm import tqdm, trange
 import os
-from modeling import MM_LLMs, MM_LLMs_Config
+from modeling_v2 import MM_LLMs, MM_LLMs_Config
 import torch
 from datasets import Audio
 from typing import Mapping, Union, List, Dict
@@ -356,7 +355,7 @@ def main():
     tokenizer.add_eos_token = False
     tokenizer.padding_side = "right"
     tokenizer.chat_template = """{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{% if message['content'] is not none and message['content'].strip() != '' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% endif %}{% elif message['role'] == 'assistant' %}{% if messages[loop.index0 - 1]['content'] is not none and messages[loop.index0 - 1]['content'].strip() != '' and message['content'] is not none and message['content'].strip() != '' %}{{ message['content'] + eos_token }}{% endif %}{% else %}{{ print('Unexpected role encountered:', message['role']) }}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"""
-    tokenizer.add_tokens(["<image>", "<audio>"])
+    tokenizer.add_tokens(["<image>", "</image>", "<audio>", "</audio>"])
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.

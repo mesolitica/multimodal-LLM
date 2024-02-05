@@ -101,17 +101,6 @@ class MM_LLMs(PreTrainedModel):
             self.config.image_config.text_config.hidden_size,
             bias=False)
 
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-
-        self.layer_norm = nn.LayerNorm(config.image_config.text_config.hidden_size)
-        self.softmax = nn.Softmax(dim=-1)
-
-        self.sigmoid = nn.Sigmoid()
-
-        self.loss_fct = CrossEntropyLoss()
-
-        self.init_weights()
-
     def forward(self,
                 input_ids: torch.LongTensor = None,
                 image_index: torch.LongTensor = None,
@@ -130,12 +119,14 @@ class MM_LLMs(PreTrainedModel):
                 output_attentions: Optional[bool] = None,
                 output_hidden_states: Optional[bool] = None,
                 use_cache: Optional[bool] = None,
-                return_dict: Optional[bool] = None):
+                return_dict: Optional[bool] = None, **kwargs):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         images = images.type(self.image_encoder.dtype) if images is not None else None
         audios = audios.type(self.audio_encoder.dtype) if audios is not None else None
+
+        print(audio_index)
 
         model_inputs = self.prepare_inputs_for_generation(
             input_ids=input_ids,
@@ -166,7 +157,9 @@ class MM_LLMs(PreTrainedModel):
             images=None,
             audios=None,
             audio_starts=None,
+            audio_ends=None,
             image_starts=None,
+            image_ends=None,
             attention_mask=None,
             labels=None,
             audio_index=None,
@@ -182,8 +175,6 @@ class MM_LLMs(PreTrainedModel):
         batch_size = text_embeddings.shape[0]
         seq_len = text_embeddings.shape[1]
         embed_dim = text_embeddings.shape[2]
-
-        ingore_num = 0
 
         max_count_audio = most_frequent_element(audio_index)
         max_count_image = most_frequent_element(image_index)
@@ -216,12 +207,15 @@ class MM_LLMs(PreTrainedModel):
             dtype=attention_mask.dtype
         )
         final_attention_mask[:, :seq_len] = attention_mask
-        final_labels = torch.zeros(
-            batch_size, new_len,
-            device=labels.device,
-            dtype=labels.dtype
-        )
-        final_labels[:, :seq_len] = labels
+        if labels is not None:
+            final_labels = torch.zeros(
+                batch_size, new_len,
+                device=labels.device,
+                dtype=labels.dtype
+            )
+            final_labels[:, :seq_len] = labels
+        else:
+            final_labels = None
 
         image_id = int(image_starts[0])
         audio_id = int(audio_starts[0])
@@ -241,23 +235,25 @@ class MM_LLMs(PreTrainedModel):
             if l == audio_id:
                 f = audio_features[b_audio]
                 b_audio += 1
-            c = torch.cat([final_embedding[b, :positions[int_b]], f, text_embeddings[b, k + 1:]])
-            ignore = torch.tensor([-100] * len(f), device=labels.device)
-            c_label = torch.cat([final_labels[b, :positions[int_b]], ignore, labels[b, k + 1:]])
 
+            c = torch.cat([final_embedding[b, :positions[int_b]], f, text_embeddings[b, k + 1:]])
             final_embedding[b, :len(c)] = c
             final_attention_mask[b, :len(c)] = 1.0
-            final_labels[b, :len(c)] = c_label
+
+            if labels is not None:
+                ignore = torch.tensor([-100] * len(f), device=labels.device)
+                c_label = torch.cat([final_labels[b, :positions[int_b]], ignore, labels[b, k + 1:]])
+                final_labels[b, :len(c)] = c_label
+
             positions[int_b] += len(f)
 
-        model_inputs.update(
-            {
-                "inputs_embeds": final_embedding,
-                "use_cache": kwargs.get("use_cache"),
-                "attention_mask": final_attention_mask,
-                "labels": final_labels,
-            }
-        )
+        model_inputs = {
+            "input_ids": input_ids,
+            "inputs_embeds": final_embedding,
+            "use_cache": kwargs.get("use_cache"),
+            "attention_mask": final_attention_mask,
+            "labels": final_labels,
+        }
         return model_inputs
 
     def encode_audio(self, audios):
