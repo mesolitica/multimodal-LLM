@@ -192,8 +192,9 @@ class MM_LLMs(PreTrainedModel):
         )
         final_attention_mask[:, :seq_len] = attention_mask
         if labels is not None:
-            final_labels = torch.zeros(
-                batch_size, new_len,
+            final_labels = torch.full(
+                (batch_size, new_len),
+                -100,
                 device=labels.device,
                 dtype=labels.dtype
             )

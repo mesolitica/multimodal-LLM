@@ -200,18 +200,7 @@ class MM_LLMs(PreTrainedModel):
         max_count_audio = most_frequent_element(audio_index)
         max_count_image = most_frequent_element(image_index)
 
-        audio_features = self.project_audio(
-            audio_features.transpose(
-                1, 2).contiguous()).transpose(
-            1, 2).contiguous()
-        audio_features = self.transform_audio_to_hidden(audio_features)
         seq_audio = audio_features.shape[1]
-
-        image_features = self.project_image(
-            image_features.transpose(
-                1, 2).contiguous()).transpose(
-            1, 2).contiguous()
-        image_features = self.transform_image_to_hidden(image_features)
         seq_image = image_features.shape[1]
 
         new_len = text_embeddings.shape[1] + seq_audio * \
@@ -229,8 +218,9 @@ class MM_LLMs(PreTrainedModel):
         )
         final_attention_mask[:, :seq_len] = attention_mask
         if labels is not None:
-            final_labels = torch.zeros(
-                batch_size, new_len,
+            final_labels = torch.full(
+                (batch_size, new_len),
+                -100,
                 device=labels.device,
                 dtype=labels.dtype
             )
@@ -281,9 +271,10 @@ class MM_LLMs(PreTrainedModel):
         return model_inputs
 
     def encode_audio(self, audios):
-        audio_features = self.audio_encoder.encoder(audios)
-        return audio_features[0]
+        encoded = self.audio_encoder.encoder(audios)[0]
+        audio_features = self.audio_projector(encoded.transpose(1, 2).contiguous())
+        return audio_features
 
     def encode_image(self, images):
-        image_features = self.visual_projection(self.image_encoder.vision_model(images)[0])
+        image_features = self.image_projector(self.image_encoder.vision_model(images)[0])
         return image_features
