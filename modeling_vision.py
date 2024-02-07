@@ -33,13 +33,11 @@ class MM_LLMs_Config(PretrainedConfig):
     def __init__(
         self,
         image_config=None,
-        audio_config=None,
         llm_config=None,
         **kwargs
     ):
 
         self.image_config = image_config
-        self.audio_config = audio_config
         self.llm_config = llm_config
 
         if isinstance(self.image_config, dict):
@@ -47,20 +45,10 @@ class MM_LLMs_Config(PretrainedConfig):
                 image_config["model_type"] if "model_type" in image_config else "clip"
             )
             self.image_config = CONFIG_MAPPING[image_config["model_type"]](**image_config)
-        if isinstance(self.audio_config, dict):
-            audio_config["model_type"] = (
-                audio_config["model_type"] if "model_type" in audio_config else "whisper"
-            )
-            self.audio_config = CONFIG_MAPPING[audio_config["model_type"]](**audio_config)
+
         if isinstance(self.llm_config, dict):
             llm_config["model_type"] = llm_config["model_type"] if "model_type" in llm_config else "llama"
             self.llm_config = CONFIG_MAPPING[llm_config["model_type"]](**llm_config)
-
-        self.hidden_size = max(
-            self.llm_config.hidden_size,
-            self.image_config.vision_config.hidden_size,
-            self.audio_config.d_model,
-        )
 
         super().__init__(**kwargs)
 
@@ -188,16 +176,9 @@ class MM_LLMs(PreTrainedModel):
         embed_dim = text_embeddings.shape[2]
 
         max_count_image = most_frequent_element(image_index)
-
-        image_features = self.project_image(
-            image_features.transpose(
-                1, 2).contiguous()).transpose(
-            1, 2).contiguous()
-        image_features = self.transform_image_to_hidden(image_features)
         seq_image = image_features.shape[1]
 
-        new_len = text_embeddings.shape[1] + seq_audio * \
-            max_count_audio + seq_image * max_count_image
+        new_len = text_embeddings.shape[1] + seq_image * max_count_image
         final_embedding = torch.zeros(
             batch_size, new_len, embed_dim,
             device=text_embeddings.device,
