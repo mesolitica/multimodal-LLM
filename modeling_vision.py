@@ -205,14 +205,16 @@ class MM_LLMs(PreTrainedModel):
 
         where_is = torch.where(input_ids == image_id)
         positions = defaultdict(int)
-        b_image = 0
+        b_image = -1
 
         for i in range(len(where_is[0])):
             b, k = where_is[0][i], where_is[1][i]
             int_b = int(b)
+            int_k = int(k)
             l = int(input_ids[b, k])
             f = image_features[b_image]
             b_image += 1
+            positions[int_b] += int_k
 
             c = torch.cat([final_embedding[b, :positions[int_b]], f, text_embeddings[b, k + 1:]])
             final_embedding[b, :len(c)] = c
