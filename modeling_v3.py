@@ -197,14 +197,29 @@ class MM_LLMs(PreTrainedModel):
         seq_len = text_embeddings.shape[1]
         embed_dim = text_embeddings.shape[2]
 
-        max_count_audio = most_frequent_element(audio_index)
-        max_count_image = most_frequent_element(image_index)
+        if len(audio_index):
+            max_count_audio = most_frequent_element(audio_index)
+        else:
+            max_count_audio = 0
+        if len(image_index):
+            max_count_image = most_frequent_element(image_index)
+        else:
+            max_count_image = 0
 
-        seq_audio = audio_features.shape[1]
-        seq_image = image_features.shape[1]
+        if audio_features is not None:
+            seq_audio = audio_features.shape[1]
+        else:
+            seq_audio = 0
 
-        new_len = text_embeddings.shape[1] + seq_audio * \
-            max_count_audio + seq_image * max_count_image
+        if image_features is not None:
+            seq_image = image_features.shape[1]
+        else:
+            seq_image = 0
+
+        audio_len = max_count_audio + seq_audio * max_count_audio
+        image_len = max_count_image + seq_image * max_count_image
+
+        new_len = text_embeddings.shape[1] + audio_len + image_len
         final_embedding = torch.zeros(
             batch_size, new_len, embed_dim,
             device=text_embeddings.device,
@@ -248,7 +263,7 @@ class MM_LLMs(PreTrainedModel):
                 f = audio_features[b_audio]
                 b_audio += 1
 
-            c = torch.cat([final_embedding[b, :int_k + positions[int_b]],
+            c = torch.cat([final_embedding[b, :int_k + 1 + positions[int_b]],
                           f, text_embeddings[b, k + 1:]])
             final_embedding[b, :len(c)] = c
             final_attention_mask[b, :len(c)] = 1.0
@@ -256,7 +271,7 @@ class MM_LLMs(PreTrainedModel):
             if labels is not None:
                 ignore = torch.tensor([-100] * len(f), device=labels.device)
                 c_label = torch.cat(
-                    [final_labels[b, :int_k + positions[int_b]], ignore, labels[b, k + 1:]])
+                    [final_labels[b, :int_k + 1 + positions[int_b]], ignore, labels[b, k + 1:]])
                 final_labels[b, :len(c)] = c_label
 
             positions[int_b] += len(f)
