@@ -243,8 +243,8 @@ class MM_LLMs(PreTrainedModel):
 
         where_is = torch.where((input_ids == audio_id) | (input_ids == image_id))
         positions = defaultdict(int)
-        b_image = -1
-        b_audio = -1
+        b_image = 0
+        b_audio = 0
 
         for i in range(len(where_is[0])):
             b, k = where_is[0][i], where_is[1][i]
@@ -257,16 +257,16 @@ class MM_LLMs(PreTrainedModel):
             if l == audio_id:
                 f = audio_features[b_audio]
                 b_audio += 1
-            positions[int_b] += int_k
 
-            c = torch.cat([final_embedding[b, :positions[int_b]], f, text_embeddings[b, k + 1:]])
+            c = torch.cat([final_embedding[b, :int_k + positions[int_b]],
+                          f, text_embeddings[b, k + 1:]])
             final_embedding[b, :len(c)] = c
             final_attention_mask[b, :len(c)] = 1.0
 
             if labels is not None:
                 ignore = torch.tensor([-100] * len(f), device=labels.device)
                 c_label = torch.cat(
-                    [final_labels[b, :positions[b_audio]], ignore, labels[b, k + 1:]])
+                    [final_labels[b, :int_k + positions[int_b]], ignore, labels[b, k + 1:]])
                 final_labels[b, :len(c)] = c_label
 
             positions[int_b] += len(f)
