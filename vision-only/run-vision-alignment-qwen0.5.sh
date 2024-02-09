@@ -8,7 +8,7 @@ torchrun --nproc_per_node 8 \
 --gradient_accumulation_steps 1 \
 --num_train_epochs 3 \
 --save_strategy "steps" \
---save_steps 100 \
+--save_steps 200 \
 --save_total_limit 2 \
 --learning_rate 1e-4 \
 --weight_decay 0. \

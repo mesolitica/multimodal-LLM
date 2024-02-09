@@ -1,10 +1,10 @@
-WANDB_PROJECT=vision-alignment \
-python3 vision_alignment.py \
---model_name_or_path mesolitica/malaysian-tinyllama-1.1b-16k-instructions-v3 \
---audio_encoder_name_or_path mesolitica/malaysian-whisper-small \
+WANDB_PROJECT=vision-alignment-mistral \
+torchrun --nproc_per_node 8 \
+-m vision_alignment \
+--model_name_or_path mesolitica/malaysian-mistral-7b-32k-instructions-v4 \
 --image_encoder_name_or_path google/siglip-base-patch16-384 \
 --train_file mosaic-vision \
---per_device_train_batch_size 20 \
+--per_device_train_batch_size 6 \
 --gradient_accumulation_steps 1 \
 --num_train_epochs 3 \
 --save_strategy "steps" \
@@ -17,6 +17,6 @@ python3 vision_alignment.py \
 --do_train \
 --bf16 True \
 --gradient_checkpointing True \
---output_dir "vision-alignment" \
+--output_dir "vision-alignment-mistral" \
 --use_flash_attention2 True \
 --block_size 2048
