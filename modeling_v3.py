@@ -216,8 +216,8 @@ class MM_LLMs(PreTrainedModel):
         else:
             seq_image = 0
 
-        audio_len = max_count_audio + seq_audio * max_count_audio
-        image_len = max_count_image + seq_image * max_count_image
+        audio_len = seq_audio * max_count_audio
+        image_len = seq_image * max_count_image
 
         new_len = text_embeddings.shape[1] + audio_len + image_len
         final_embedding = torch.zeros(

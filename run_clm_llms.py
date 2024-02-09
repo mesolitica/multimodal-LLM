@@ -304,6 +304,8 @@ def main():
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+    tokenizer.add_bos_token = False
+    tokenizer.add_eos_token = False
     tokenizer.add_tokens(["<image>", "</image>", "<audio>", "</audio>"])
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
