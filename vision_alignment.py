@@ -304,11 +304,6 @@ def main():
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
-    tokenizer.pad_token = tokenizer.unk_token
-    tokenizer.add_bos_token = False
-    tokenizer.add_eos_token = False
-    tokenizer.padding_side = "right"
-    tokenizer.chat_template = """{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{% if message['content'] is not none and message['content'].strip() != '' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% endif %}{% elif message['role'] == 'assistant' %}{% if messages[loop.index0 - 1]['content'] is not none and messages[loop.index0 - 1]['content'].strip() != '' and message['content'] is not none and message['content'].strip() != '' %}{{ message['content'] + eos_token }}{% endif %}{% else %}{{ print('Unexpected role encountered:', message['role']) }}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"""
     tokenizer.add_tokens(["<image>", "</image>", "<audio>", "</audio>"])
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The

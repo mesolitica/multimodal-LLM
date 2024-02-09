@@ -27,7 +27,6 @@ import datasets
 import evaluate
 import torch
 from datasets import load_dataset
-import librosa
 import transformers
 from transformers import (
     AutoConfig,
@@ -58,7 +57,7 @@ from collections.abc import Mapping
 from PIL import Image
 from tqdm import tqdm, trange
 import os
-from modeling_v2 import MM_LLMs, MM_LLMs_Config
+from modeling_vision import MM_LLMs, MM_LLMs_Config
 import torch
 from datasets import Audio
 from typing import Mapping, Union, List, Dict
@@ -91,14 +90,10 @@ class DataCollator():
         bs = len(features)
         first = features[0]
 
-        batch['audio_index'] = torch.tensor([], dtype=torch.int)
         batch['image_index'] = torch.tensor([], dtype=torch.int)
 
         for index, feature in enumerate(features):
             local_index = index % (bs)
-            if feature['audios'] is not None:
-                batch['audio_index'] = torch.cat([batch['audio_index'], torch.tensor(
-                    [local_index] * len(feature['audios']), dtype=torch.int)])
 
             if feature['images'] is not None:
                 batch['image_index'] = torch.cat([batch['image_index'], torch.tensor(
@@ -129,16 +124,12 @@ class DataCollator():
         batch['input_ids'] = input_ids['input_ids']
         batch['attention_mask'] = input_ids['attention_mask']
         batch['labels'] = input_ids['input_ids'].clone()
-        batch['labels'][batch['labels'] == 0] = -100
+        batch['labels'][batch['labels'] == self.tokenizer.pad_token_id] = -100
 
         batch['image_starts'] = torch.tensor(
             [self.tokenizer.convert_tokens_to_ids('<image>')] * bs, dtype=torch.int)
         batch['image_ends'] = torch.tensor(
             [self.tokenizer.convert_tokens_to_ids('</image>')] * bs, dtype=torch.int)
-        batch['audio_starts'] = torch.tensor(
-            [self.tokenizer.convert_tokens_to_ids('<audio>')] * bs, dtype=torch.int)
-        batch['audio_ends'] = torch.tensor(
-            [self.tokenizer.convert_tokens_to_ids('</audio>')] * bs, dtype=torch.int)
 
         return batch
 
@@ -150,15 +141,6 @@ class ModelArguments:
     """
 
     model_name_or_path: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The model checkpoint for weights initialization.Don't set if you want to train a model from scratch."
-            )
-        },
-    )
-
-    audio_encoder_name_or_path: Optional[str] = field(
         default=None,
         metadata={
             "help": (
@@ -215,7 +197,6 @@ class ModelArguments:
                 "float32"],
         },
     )
-
     use_flash_attention2: Optional[bool] = field(
         default=False
     )
@@ -340,38 +321,24 @@ def main():
     if os.path.isdir(
             training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch.")
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
     # load model
     image_config = AutoConfig.from_pretrained(model_args.image_encoder_name_or_path)
-    audio_config = AutoConfig.from_pretrained(model_args.audio_encoder_name_or_path)
     llm_config = AutoConfig.from_pretrained(model_args.model_name_or_path)
 
     model_config = MM_LLMs_Config(
-        image_config=image_config,
-        audio_config=audio_config,
-        llm_config=llm_config)
+        image_config=image_config, llm_config=llm_config)
 
     # load model separately
     model = MM_LLMs(config=model_config)
 
     image_processor = AutoProcessor.from_pretrained(model_args.image_encoder_name_or_path)
-    audio_processor = AutoProcessor.from_pretrained(model_args.audio_encoder_name_or_path)
     default_height = image_processor.image_processor.size['height']
 
     model.image_encoder = model.image_encoder.from_pretrained(model_args.image_encoder_name_or_path)
-    model.audio_encoder = model.audio_encoder.from_pretrained(model_args.audio_encoder_name_or_path)
     model.llm = model.llm.from_pretrained(model_args.model_name_or_path,
                                           use_flash_attention_2=model_args.use_flash_attention2,
                                           torch_dtype=torch.bfloat16)
@@ -385,9 +352,9 @@ def main():
         param.requires_grad = False
         model.image_encoder._requires_grad = False
 
-    for param in model.audio_encoder.parameters():
+    for param in model.llm.parameters():
         param.requires_grad = False
-        model.audio_encoder._requires_grad = False
+        model.llm._requires_grad = False
 
     max_length = data_args.block_size
 
@@ -417,33 +384,17 @@ def main():
         def __getitem__(self, idx):
             try:
                 data = self.dataset[idx]
-                audio_list = []
                 image_list = []
 
                 for x in data['filename']:
-                    if x.endswith('.mp3'):
-                        audio = self.audio.decode_example(self.audio.encode_example(x))['array']
 
-                        audio_features = audio_processor(
-                            audio, sampling_rate=self.sr, return_tensors='pt')
-
-                        audio_list.append(audio_features['input_features'])
-
-                    elif x.endswith('.jpg'):
+                    if x.endswith('.jpg'):
                         image = Image.open(x)
 
                         image_output = image_processor(
                             images=image, return_tensors='pt')['pixel_values']
 
                         image_list.append(image_output)
-
-                if not len(audio_list):
-                    audio = np.zeros((self.sr * 10,))
-
-                    audio_features = audio_processor(
-                        audio, sampling_rate=self.sr, return_tensors='pt')
-
-                    audio_list.append(audio_features['input_features'])
 
                 if not len(image_list):
                     image = np.zeros((3, default_height, default_height))
@@ -464,8 +415,7 @@ def main():
                     return_length=False
                 )
 
-                outputs['audios'] = torch.cat(audio_list, dim=0) if audio_list else None
-                outputs['images'] = torch.cat(image_list, dim=0) if image_list else None
+                outputs['images'] = torch.cat(image_list, dim=0)
 
                 return outputs
             except Exception as e:
@@ -484,18 +434,15 @@ def main():
             if param.requires_grad:
                 print(name)
 
-    # Initialize our Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=None,
         tokenizer=tokenizer,
-        # Data collator will default to DataCollatorWithPadding, so we change it.
         data_collator=data_collator,
     )
 
-    # Training
     if training_args.do_train:
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
@@ -504,7 +451,6 @@ def main():
             checkpoint = last_checkpoint
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
 
-        # Saves the tokenizer too for easy upload
         trainer.save_model(output_dir=training_args.output_dir)
         image_processor.save_pretrained(training_args.output_dir)
         audio_processor.save_pretrained(training_args.output_dir)
