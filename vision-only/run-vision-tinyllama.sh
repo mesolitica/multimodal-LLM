@@ -4,11 +4,11 @@ deepspeed vision_train.py \
 --model_name_or_path mesolitica/malaysian-tinyllama-1.1b-vision-alignment \
 --image_encoder_name_or_path google/siglip-base-patch16-384 \
 --train_file mosaic-multimodal-vision \
---per_device_train_batch_size 18 \
---gradient_accumulation_steps 1 \
+--per_device_train_batch_size 3 \
+--gradient_accumulation_steps 5 \
 --num_train_epochs 3 \
 --save_strategy "steps" \
---save_steps 100 \
+--save_steps 50 \
 --save_total_limit 2 \
 --learning_rate 2e-5 \
 --warmup_ratio 0.03 \

@@ -392,7 +392,7 @@ def main():
                 for x in data['filename']:
 
                     if x.endswith('.jpg'):
-                        image = Image.open(x)
+                        image = Image.open(x).convert('RGB')
 
                         image_output = image_processor(
                             images=image, return_tensors='pt')['pixel_values']
