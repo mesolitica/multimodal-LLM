@@ -492,10 +492,10 @@ def main():
 
     train_dataset = MMDataset(data_args.train_file)
 
-    # if training_args.local_rank == 0:
-    #     for name, param in model.named_parameters():
-    #         if param.requires_grad:
-    #             print(name)
+    if training_args.local_rank == 0:
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                print(name)
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -504,7 +504,6 @@ def main():
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=None,
         tokenizer=tokenizer,
-        # Data collator will default to DataCollatorWithPadding, so we change it.
         data_collator=data_collator,
     )
 

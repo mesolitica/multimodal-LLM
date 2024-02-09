@@ -1,6 +1,7 @@
 WANDB_PROJECT=vision-alignment \
 python3 vision_alignment.py \
 --model_name_or_path mesolitica/malaysian-tinyllama-1.1b-16k-instructions-v3 \
+--audio_encoder_name_or_path mesolitica/malaysian-whisper-small \
 --image_encoder_name_or_path google/siglip-base-patch16-384 \
 --train_file mosaic-vision \
 --per_device_train_batch_size 20 \
@@ -18,4 +19,4 @@ python3 vision_alignment.py \
 --gradient_checkpointing True \
 --output_dir "vision-alignment" \
 --use_flash_attention2 True \
---block_size 8192
+--block_size 2048
