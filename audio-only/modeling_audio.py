@@ -32,21 +32,14 @@ class MM_LLMs_Config(PretrainedConfig):
 
     def __init__(
         self,
-        image_config=None,
         audio_config=None,
         llm_config=None,
         **kwargs
     ):
 
-        self.image_config = image_config
         self.audio_config = audio_config
         self.llm_config = llm_config
 
-        if isinstance(self.image_config, dict):
-            image_config["model_type"] = (
-                image_config["model_type"] if "model_type" in image_config else "clip"
-            )
-            self.image_config = CONFIG_MAPPING[image_config["model_type"]](**image_config)
         if isinstance(self.audio_config, dict):
             audio_config["model_type"] = (
                 audio_config["model_type"] if "model_type" in audio_config else "whisper"
@@ -55,12 +48,6 @@ class MM_LLMs_Config(PretrainedConfig):
         if isinstance(self.llm_config, dict):
             llm_config["model_type"] = llm_config["model_type"] if "model_type" in llm_config else "llama"
             self.llm_config = CONFIG_MAPPING[llm_config["model_type"]](**llm_config)
-
-        self.hidden_size = max(
-            self.llm_config.hidden_size,
-            self.image_config.vision_config.hidden_size,
-            self.audio_config.d_model,
-        )
 
         super().__init__(**kwargs)
 
@@ -103,20 +90,18 @@ class MM_LLMs(PreTrainedModel):
     supports_gradient_checkpointing = True
     _supports_flash_attn_2 = True
 
-    def __init__(self, config):
+    def __init__(self, config, flash_attention=False, dtype=torch.float32):
         super().__init__(config)
         self.config = config
 
-        self.image_encoder = AutoModel.from_config(config.image_config)
-
         self.audio_encoder = AutoModel.from_config(config.audio_config)
 
-        self.llm = AutoModelForCausalLM.from_config(config.llm_config)
-
-        self.image_projector = LlavaMultiModalProjector(
-            config.image_config.vision_config.hidden_size,
-            config.llm_config.hidden_size
+        self.llm = AutoModelForCausalLM.from_config(
+            config.llm_config,
+            use_flash_attention_2=flash_attention,
+            torch_dtype=dtype,
         )
+
         self.audio_projector = LlavaMultiModalProjector(
             config.audio_config.d_model,
             config.llm_config.hidden_size,
@@ -146,7 +131,6 @@ class MM_LLMs(PreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        images = images.type(self.image_encoder.dtype) if images is not None else None
         audios = audios.type(self.audio_encoder.dtype) if audios is not None else None
 
         model_inputs = self.prepare_inputs_for_generation(
@@ -162,6 +146,7 @@ class MM_LLMs(PreTrainedModel):
             attention_mask=attention_mask,
             labels=labels)
 
+        print(input_ids.shape, model_inputs['inputs_embeds'].shape)
         outputs = self.llm(
             inputs_embeds=model_inputs['inputs_embeds'],
             attention_mask=model_inputs['attention_mask'],
@@ -187,8 +172,6 @@ class MM_LLMs(PreTrainedModel):
             image_index=None,
             **kwargs):
 
-        image_features = self.encode_image(
-            images) if images is not None else None
         audio_features = self.encode_audio(
             audios) if audios is not None else None
         embed_tokens = self.llm.model.embed_tokens
@@ -201,25 +184,15 @@ class MM_LLMs(PreTrainedModel):
             max_count_audio = most_frequent_element(audio_index)
         else:
             max_count_audio = 0
-        if len(image_index):
-            max_count_image = most_frequent_element(image_index)
-        else:
-            max_count_image = 0
 
         if audio_features is not None:
             seq_audio = audio_features.shape[1]
         else:
             seq_audio = 0
 
-        if image_features is not None:
-            seq_image = image_features.shape[1]
-        else:
-            seq_image = 0
-
         audio_len = seq_audio * max_count_audio
-        image_len = seq_image * max_count_image
 
-        new_len = text_embeddings.shape[1] + audio_len + image_len
+        new_len = text_embeddings.shape[1] + audio_len
         final_embedding = torch.zeros(
             batch_size, new_len, embed_dim,
             device=text_embeddings.device,
@@ -243,25 +216,18 @@ class MM_LLMs(PreTrainedModel):
         else:
             final_labels = None
 
-        image_id = int(image_starts[0])
         audio_id = int(audio_starts[0])
 
-        where_is = torch.where((input_ids == audio_id) | (input_ids == image_id))
+        where_is = torch.where(input_ids == audio_id)
         positions = defaultdict(int)
-        b_image = 0
         b_audio = 0
 
         for i in range(len(where_is[0])):
             b, k = where_is[0][i], where_is[1][i]
             int_b = int(b)
             int_k = int(k)
-            l = int(input_ids[b, k])
-            if l == image_id:
-                f = image_features[b_image]
-                b_image += 1
-            if l == audio_id:
-                f = audio_features[b_audio]
-                b_audio += 1
+            f = audio_features[b_audio]
+            b_audio += 1
 
             c = torch.cat([final_embedding[b, :int_k + 1 + positions[int_b]],
                           f, text_embeddings[b, k + 1:]])
@@ -289,7 +255,3 @@ class MM_LLMs(PreTrainedModel):
         encoded = self.audio_encoder.encoder(audios)[0]
         audio_features = self.audio_projector(encoded.transpose(1, 2).contiguous())
         return audio_features
-
-    def encode_image(self, images):
-        image_features = self.image_projector(self.image_encoder.vision_model(images)[0])
-        return image_features

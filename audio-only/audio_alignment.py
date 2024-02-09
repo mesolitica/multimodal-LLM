@@ -92,17 +92,12 @@ class DataCollator():
         first = features[0]
 
         batch['audio_index'] = torch.tensor([], dtype=torch.int)
-        batch['image_index'] = torch.tensor([], dtype=torch.int)
 
         for index, feature in enumerate(features):
             local_index = index % (bs)
             if feature['audios'] is not None:
                 batch['audio_index'] = torch.cat([batch['audio_index'], torch.tensor(
                     [local_index] * len(feature['audios']), dtype=torch.int)])
-
-            if feature['images'] is not None:
-                batch['image_index'] = torch.cat([batch['image_index'], torch.tensor(
-                    [local_index] * len(feature['images']), dtype=torch.int)])
 
         for k, v in first.items():
 
@@ -167,14 +162,6 @@ class ModelArguments:
         },
     )
 
-    image_encoder_name_or_path: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The model checkpoint for weights initialization.Don't set if you want to train a model from scratch."
-            )
-        },
-    )
     config_overrides: Optional[str] = field(
         default=None, metadata={
             "help": (
@@ -348,23 +335,18 @@ def main():
     set_seed(training_args.seed)
 
     # load model
-    image_config = AutoConfig.from_pretrained(model_args.image_encoder_name_or_path)
     audio_config = AutoConfig.from_pretrained(model_args.audio_encoder_name_or_path)
     llm_config = AutoConfig.from_pretrained(model_args.model_name_or_path)
 
     model_config = MM_LLMs_Config(
-        image_config=image_config,
         audio_config=audio_config,
         llm_config=llm_config)
 
     # load model separately
     model = MM_LLMs(config=model_config)
 
-    image_processor = AutoProcessor.from_pretrained(model_args.image_encoder_name_or_path)
     audio_processor = AutoProcessor.from_pretrained(model_args.audio_encoder_name_or_path)
-    default_height = image_processor.image_processor.size['height']
 
-    model.image_encoder = model.image_encoder.from_pretrained(model_args.image_encoder_name_or_path)
     model.audio_encoder = model.audio_encoder.from_pretrained(model_args.audio_encoder_name_or_path)
     model.llm = model.llm.from_pretrained(model_args.model_name_or_path,
                                           use_flash_attention_2=model_args.use_flash_attention2,
@@ -374,11 +356,6 @@ def main():
 
     model.config.llm_config.vocab_size = len(tokenizer)
 
-    # freeze encoder model
-    for param in model.image_encoder.parameters():
-        param.requires_grad = False
-        model.image_encoder._requires_grad = False
-
     for param in model.audio_encoder.parameters():
         param.requires_grad = False
         model.audio_encoder._requires_grad = False
@@ -386,10 +363,6 @@ def main():
     for param in model.llm.parameters():
         param.requires_grad = False
         model.llm._requires_grad = False
-
-    for param in model.image_projector.parameters():
-        param.requires_grad = False
-        model.image_projector._requires_grad = False
 
     max_length = data_args.block_size
 
@@ -420,24 +393,14 @@ def main():
             try:
                 data = self.dataset[idx]
                 audio_list = []
-                image_list = []
 
                 for x in data['filename']:
-                    if x.endswith('.mp3'):
-                        audio = self.audio.decode_example(self.audio.encode_example(x))['array']
+                    audio = self.audio.decode_example(self.audio.encode_example(x))['array']
 
-                        audio_features = audio_processor(
-                            audio, sampling_rate=self.sr, return_tensors='pt')
+                    audio_features = audio_processor(
+                        audio, sampling_rate=self.sr, return_tensors='pt')
 
-                        audio_list.append(audio_features['input_features'])
-
-                    elif x.endswith('.jpg'):
-                        image = Image.open(x)
-
-                        image_output = image_processor(
-                            images=image, return_tensors='pt')['pixel_values']
-
-                        image_list.append(image_output)
+                    audio_list.append(audio_features['input_features'])
 
                 if not len(audio_list):
                     audio = np.zeros((self.sr * 10,))
@@ -446,14 +409,6 @@ def main():
                         audio, sampling_rate=self.sr, return_tensors='pt')
 
                     audio_list.append(audio_features['input_features'])
-
-                if not len(image_list):
-                    image = np.zeros((3, default_height, default_height))
-
-                    image_output = image_processor(
-                        images=image, return_tensors='pt')['pixel_values']
-
-                    image_list.append(image_output)
 
                 full_text = tokenizer.apply_chat_template(data['conversations'], tokenize=False)
 
@@ -467,7 +422,6 @@ def main():
                 )
 
                 outputs['audios'] = torch.cat(audio_list, dim=0) if audio_list else None
-                outputs['images'] = torch.cat(image_list, dim=0) if image_list else None
 
                 return outputs
             except Exception as e:
@@ -507,7 +461,6 @@ def main():
 
         # Saves the tokenizer too for easy upload
         trainer.save_model(output_dir=training_args.output_dir)
-        image_processor.save_pretrained(training_args.output_dir)
         audio_processor.save_pretrained(training_args.output_dir)
 
         metrics = train_result.metrics

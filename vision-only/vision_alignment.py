@@ -456,7 +456,6 @@ def main():
 
         trainer.save_model(output_dir=training_args.output_dir)
         image_processor.save_pretrained(training_args.output_dir)
-        audio_processor.save_pretrained(training_args.output_dir)
 
         metrics = train_result.metrics
 

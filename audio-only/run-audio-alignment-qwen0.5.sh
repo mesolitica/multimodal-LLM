@@ -1,7 +1,7 @@
-WANDB_PROJECT=audio-alignment-tinyllama \
+WANDB_PROJECT=audio-alignment-Qwen1.5-0.5B \
 torchrun --nproc_per_node 8 \
 -m audio_alignment \
---model_name_or_path mesolitica/malaysian-tinyllama-1.1b-16k-instructions-v3 \
+--model_name_or_path mesolitica/malaysian-Qwen1.5-0.5B-16k-instructions \
 --audio_encoder_name_or_path mesolitica/malaysian-whisper-small \
 --train_file mosaic-audio \
 --per_device_train_batch_size 16 \
@@ -17,6 +17,6 @@ torchrun --nproc_per_node 8 \
 --do_train \
 --bf16 True \
 --gradient_checkpointing True \
---output_dir "audio-alignment-tinyllama" \
+--output_dir "audio-alignment" \
 --use_flash_attention2 True \
 --block_size 2048
