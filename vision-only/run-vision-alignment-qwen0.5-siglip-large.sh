@@ -1,14 +1,14 @@
-WANDB_PROJECT=vision-alignment-tinyllama \
+WANDB_PROJECT=vision-alignment-Qwen1.5-0.5B-siglip-large \
 torchrun --nproc_per_node 8 \
 -m vision_alignment \
---model_name_or_path mesolitica/malaysian-tinyllama-1.1b-16k-instructions-v3 \
---image_encoder_name_or_path google/siglip-base-patch16-384 \
+--model_name_or_path mesolitica/malaysian-Qwen1.5-0.5B-16k-instructions \
+--image_encoder_name_or_path google/siglip-large-patch16-384 \
 --train_file mosaic-vision \
---per_device_train_batch_size 18 \
+--per_device_train_batch_size 12 \
 --gradient_accumulation_steps 1 \
 --num_train_epochs 3 \
 --save_strategy "steps" \
---save_steps 100 \
+--save_steps 200 \
 --save_total_limit 2 \
 --learning_rate 1e-4 \
 --weight_decay 0. \
@@ -17,7 +17,7 @@ torchrun --nproc_per_node 8 \
 --do_train \
 --bf16 True \
 --gradient_checkpointing True \
---output_dir "vision-alignment-tinyllama" \
+--output_dir "vision-alignment-qwen0.5-siglip-large" \
 --use_flash_attention2 True \
 --block_size 2048 \
 --vision_select_layer -2

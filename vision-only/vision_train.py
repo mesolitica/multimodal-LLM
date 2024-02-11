@@ -200,6 +200,9 @@ class ModelArguments:
     use_flash_attention2: Optional[bool] = field(
         default=False
     )
+    vision_select_layer: Optional[int] = field(
+        default=None
+    )
 
     def __post_init__(self):
         if self.config_overrides is not None and (

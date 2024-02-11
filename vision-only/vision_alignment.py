@@ -200,6 +200,9 @@ class ModelArguments:
     use_flash_attention2: Optional[bool] = field(
         default=False
     )
+    vision_select_layer: Optional[int] = field(
+        default=None
+    )
 
     def __post_init__(self):
         if self.config_overrides is not None and (
@@ -333,10 +336,16 @@ def main():
     llm_config = AutoConfig.from_pretrained(model_args.model_name_or_path)
 
     model_config = MM_LLMs_Config(
-        image_config=image_config, llm_config=llm_config)
+        image_config=image_config,
+        llm_config=llm_config,
+        vision_select_layer=model_args.vision_select_layer
+    )
 
     # load model separately
     model = MM_LLMs(config=model_config)
+
+    print(model_config)
+    print(model.config.vision_select_layer)
 
     image_processor = AutoProcessor.from_pretrained(model_args.image_encoder_name_or_path)
     default_height = image_processor.image_processor.size['height']

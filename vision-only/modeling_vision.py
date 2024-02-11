@@ -34,11 +34,13 @@ class MM_LLMs_Config(PretrainedConfig):
         self,
         image_config=None,
         llm_config=None,
+        vision_select_layer=None,
         **kwargs
     ):
 
         self.image_config = image_config
         self.llm_config = llm_config
+        self.vision_select_layer = vision_select_layer
 
         if isinstance(self.image_config, dict):
             image_config["model_type"] = (
@@ -75,7 +77,8 @@ class LlavaMultiModalProjector(nn.Module):
         self.linear_2 = nn.Linear(
             out_hidden_size,
             out_hidden_size,
-            bias=True)
+            bias=True
+        )
 
     def forward(self, image_features):
         hidden_states = self.linear_1(image_features)
@@ -243,5 +246,10 @@ class MM_LLMs(PreTrainedModel):
         return model_inputs
 
     def encode_image(self, images):
-        image_features = self.image_projector(self.image_encoder.vision_model(images)[0])
+        if self.config.vision_select_layer is not None:
+            encoded = self.image_encoder.vision_model(images, output_hidden_states=True)
+            encoded = encoded.hidden_states[self.config.vision_select_layer]
+        else:
+            encoded = self.image_encoder.vision_model(images)[0]
+        image_features = self.image_projector(encoded)
         return image_features
