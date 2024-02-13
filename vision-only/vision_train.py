@@ -334,6 +334,8 @@ def main():
     model = MM_LLMs.from_pretrained(
         model_args.model_name_or_path, flash_attention=True, dtype=torch.bfloat16,
     )
+    print(model.llm)
+    print(model.config.vision_select_layer)
 
     image_processor = AutoProcessor.from_pretrained(model_args.image_encoder_name_or_path)
     default_height = image_processor.image_processor.size['height']

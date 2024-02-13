@@ -340,7 +340,8 @@ def main():
 
     model_config = MM_LLMs_Config(
         audio_config=audio_config,
-        llm_config=llm_config)
+        llm_config=llm_config
+    )
 
     # load model separately
     model = MM_LLMs(config=model_config)
@@ -348,9 +349,11 @@ def main():
     audio_processor = AutoProcessor.from_pretrained(model_args.audio_encoder_name_or_path)
 
     model.audio_encoder = model.audio_encoder.from_pretrained(model_args.audio_encoder_name_or_path)
-    model.llm = model.llm.from_pretrained(model_args.model_name_or_path,
-                                          use_flash_attention_2=model_args.use_flash_attention2,
-                                          torch_dtype=torch.bfloat16)
+    model.llm = model.llm.from_pretrained(
+        model_args.model_name_or_path,
+        use_flash_attention_2=model_args.use_flash_attention2,
+        torch_dtype=torch.bfloat16
+    )
 
     model.llm.resize_token_embeddings(len(tokenizer))
 

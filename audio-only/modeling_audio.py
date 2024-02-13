@@ -34,11 +34,13 @@ class MM_LLMs_Config(PretrainedConfig):
         self,
         audio_config=None,
         llm_config=None,
+        audio_select_layer=-2,
         **kwargs
     ):
 
         self.audio_config = audio_config
         self.llm_config = llm_config
+        self.audio_select_layer = audio_select_layer
 
         if isinstance(self.audio_config, dict):
             audio_config["model_type"] = (
@@ -252,6 +254,8 @@ class MM_LLMs(PreTrainedModel):
         return model_inputs
 
     def encode_audio(self, audios):
-        encoded = self.audio_encoder.encoder(audios)[0]
+
+        encoded = self.audio_encoder.encoder(audios, output_hidden_states=True)
+        encoded = encoded.hidden_states[self.config.audio_select_layer]
         audio_features = self.audio_projector(encoded.transpose(1, 2).contiguous())
         return audio_features

@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 import copy
 import math
+from transformers.activations import gelu
 from typing import List, Optional, Tuple, Union
 from transformers.modeling_utils import PreTrainedModel, PretrainedConfig
 from transformers import CONFIG_MAPPING
@@ -29,18 +30,21 @@ class MM_LLMs_Config(PretrainedConfig):
     model_type = 'mm_llms'
     is_composition = True
 
-    def __init__(self, attention_heads=8, image_conv_kernel=48, image_conv_stride=36,
-                 audio_conv_kernel=240, audio_conv_stride=220,
-                 image_config=None, audio_config=None, llm_config=None, **kwargs):
+    def __init__(
+        self,
+        image_config=None,
+        audio_config=None,
+        llm_config=None,
+        audio_select_layer=-2,
+        vision_select_layer=-2,
+        **kwargs
+    ):
 
         self.image_config = image_config
         self.audio_config = audio_config
         self.llm_config = llm_config
-        self.attention_heads = attention_heads
-        self.image_conv_kernel = image_conv_kernel
-        self.image_conv_stride = image_conv_stride
-        self.audio_conv_kernel = audio_conv_kernel
-        self.audio_conv_stride = audio_conv_stride
+        self.audio_select_layer = audio_select_layer
+        self.vision_select_layer = vision_select_layer
 
         if isinstance(self.image_config, dict):
             image_config["model_type"] = (
@@ -65,6 +69,39 @@ class MM_LLMs_Config(PretrainedConfig):
         super().__init__(**kwargs)
 
 
+class LlavaMultiModalProjector(nn.Module):
+    def __init__(self, in_hidden_size, out_hidden_size, conv_kernel=None, conv_stride=3):
+        super().__init__()
+
+        self.conv_kernel = conv_kernel
+
+        if conv_kernel:
+            self.linear_1 = nn.Conv1d(
+                in_hidden_size,
+                out_hidden_size,
+                kernel_size=conv_kernel,
+                stride=conv_stride)
+        else:
+            self.linear_1 = nn.Linear(
+                in_hidden_size,
+                out_hidden_size,
+                bias=True,
+            )
+        self.act = gelu
+        self.linear_2 = nn.Linear(
+            out_hidden_size,
+            out_hidden_size,
+            bias=True)
+
+    def forward(self, image_features):
+        hidden_states = self.linear_1(image_features)
+        if self.conv_kernel:
+            hidden_states = hidden_states.transpose(1, 2).contiguous()
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.linear_2(hidden_states)
+        return hidden_states
+
+
 class MM_LLMs(PreTrainedModel):
     config_class = MM_LLMs_Config
     supports_gradient_checkpointing = True
@@ -80,26 +117,16 @@ class MM_LLMs(PreTrainedModel):
 
         self.llm = AutoModelForCausalLM.from_config(config.llm_config)
 
-        self.transform_audio_to_hidden = nn.Linear(config.audio_config.d_model,
-                                                   config.llm_config.hidden_size)
-        self.transform_image_to_hidden = nn.Linear(config.image_config.text_config.hidden_size,
-                                                   config.llm_config.hidden_size)
-
-        self.project_image = nn.Conv1d(
-            config.image_config.text_config.hidden_size,
-            config.image_config.text_config.hidden_size,
-            kernel_size=config.image_conv_kernel,
-            stride=config.image_conv_stride)
-        self.project_audio = nn.Conv1d(
+        self.image_projector = LlavaMultiModalProjector(
+            config.image_config.vision_config.hidden_size,
+            config.llm_config.hidden_size
+        )
+        self.audio_projector = LlavaMultiModalProjector(
             config.audio_config.d_model,
-            config.audio_config.d_model,
-            kernel_size=config.audio_conv_kernel,
-            stride=config.audio_conv_stride)
-
-        self.visual_projection = nn.Linear(
-            self.image_encoder.vision_model.config.hidden_size,
-            self.config.image_config.text_config.hidden_size,
-            bias=False)
+            config.llm_config.hidden_size,
+            conv_kernel=40,
+            conv_stride=3,
+        )
 
     def forward(self,
                 input_ids: torch.LongTensor = None,
@@ -125,8 +152,6 @@ class MM_LLMs(PreTrainedModel):
 
         images = images.type(self.image_encoder.dtype) if images is not None else None
         audios = audios.type(self.audio_encoder.dtype) if audios is not None else None
-
-        print(audio_index)
 
         model_inputs = self.prepare_inputs_for_generation(
             input_ids=input_ids,
@@ -176,25 +201,29 @@ class MM_LLMs(PreTrainedModel):
         seq_len = text_embeddings.shape[1]
         embed_dim = text_embeddings.shape[2]
 
-        max_count_audio = most_frequent_element(audio_index)
-        max_count_image = most_frequent_element(image_index)
+        if len(audio_index):
+            max_count_audio = most_frequent_element(audio_index)
+        else:
+            max_count_audio = 0
+        if len(image_index):
+            max_count_image = most_frequent_element(image_index)
+        else:
+            max_count_image = 0
 
-        audio_features = self.project_audio(
-            audio_features.transpose(
-                1, 2).contiguous()).transpose(
-            1, 2).contiguous()
-        audio_features = self.transform_audio_to_hidden(audio_features)
-        seq_audio = audio_features.shape[1]
+        if audio_features is not None:
+            seq_audio = audio_features.shape[1]
+        else:
+            seq_audio = 0
 
-        image_features = self.project_image(
-            image_features.transpose(
-                1, 2).contiguous()).transpose(
-            1, 2).contiguous()
-        image_features = self.transform_image_to_hidden(image_features)
-        seq_image = image_features.shape[1]
+        if image_features is not None:
+            seq_image = image_features.shape[1]
+        else:
+            seq_image = 0
 
-        new_len = text_embeddings.shape[1] + seq_audio * \
-            max_count_audio + seq_image * max_count_image
+        audio_len = seq_audio * max_count_audio
+        image_len = seq_image * max_count_image
+
+        new_len = text_embeddings.shape[1] + audio_len + image_len
         final_embedding = torch.zeros(
             batch_size, new_len, embed_dim,
             device=text_embeddings.device,
@@ -208,8 +237,9 @@ class MM_LLMs(PreTrainedModel):
         )
         final_attention_mask[:, :seq_len] = attention_mask
         if labels is not None:
-            final_labels = torch.zeros(
-                batch_size, new_len,
+            final_labels = torch.full(
+                (batch_size, new_len),
+                -100,
                 device=labels.device,
                 dtype=labels.dtype
             )
@@ -228,6 +258,7 @@ class MM_LLMs(PreTrainedModel):
         for i in range(len(where_is[0])):
             b, k = where_is[0][i], where_is[1][i]
             int_b = int(b)
+            int_k = int(k)
             l = int(input_ids[b, k])
             if l == image_id:
                 f = image_features[b_image]
@@ -236,13 +267,15 @@ class MM_LLMs(PreTrainedModel):
                 f = audio_features[b_audio]
                 b_audio += 1
 
-            c = torch.cat([final_embedding[b, :positions[int_b]], f, text_embeddings[b, k + 1:]])
+            c = torch.cat([final_embedding[b, :int_k + 1 + positions[int_b]],
+                          f, text_embeddings[b, k + 1:]])
             final_embedding[b, :len(c)] = c
             final_attention_mask[b, :len(c)] = 1.0
 
             if labels is not None:
                 ignore = torch.tensor([-100] * len(f), device=labels.device)
-                c_label = torch.cat([final_labels[b, :positions[int_b]], ignore, labels[b, k + 1:]])
+                c_label = torch.cat(
+                    [final_labels[b, :int_k + 1 + positions[int_b]], ignore, labels[b, k + 1:]])
                 final_labels[b, :len(c)] = c_label
 
             positions[int_b] += len(f)
@@ -257,12 +290,16 @@ class MM_LLMs(PreTrainedModel):
         return model_inputs
 
     def encode_audio(self, audios):
-        audio_features = self.audio_encoder.encoder(audios)
-        return audio_features[0]
+        encoded = self.audio_encoder.encoder(audios, output_hidden_states=True)
+        encoded = encoded.hidden_states[self.config.audio_select_layer]
+        audio_features = self.audio_projector(encoded.transpose(1, 2).contiguous())
+        return audio_features
 
     def encode_image(self, images):
-
-        image_features = self.visual_projection(
-            self.image_encoder.vision_model(images)[0])[:, 1:, :]
-
+        if self.config.vision_select_layer is not None:
+            encoded = self.image_encoder.vision_model(images, output_hidden_states=True)
+            encoded = encoded.hidden_states[self.config.vision_select_layer]
+        else:
+            encoded = self.image_encoder.vision_model(images)[0]
+        image_features = self.image_projector(encoded)
         return image_features

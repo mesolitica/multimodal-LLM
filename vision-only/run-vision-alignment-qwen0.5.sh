@@ -19,4 +19,5 @@ torchrun --nproc_per_node 8 \
 --gradient_checkpointing True \
 --output_dir "vision-alignment-qwen0.5" \
 --use_flash_attention2 True \
---block_size 2048
+--block_size 2048 \
+--vision_select_layer -2

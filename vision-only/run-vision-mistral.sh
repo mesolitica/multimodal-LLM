@@ -1,7 +1,7 @@
-WANDB_PROJECT=vision-tinyllama \
+WANDB_PROJECT=vision-mistral \
 deepspeed vision_train.py \
 --deepspeed ds_config_zero2.json \
---model_name_or_path mesolitica/malaysian-tinyllama-1.1b-siglip-base-384-vision-alignment \
+--model_name_or_path mesolitica/malaysian-mistral-siglip-base-384-vision-alignment \
 --image_encoder_name_or_path google/siglip-base-patch16-384 \
 --train_file mosaic-multimodal-vision \
 --per_device_train_batch_size 6 \
@@ -16,6 +16,6 @@ deepspeed vision_train.py \
 --do_train \
 --bf16 True \
 --gradient_checkpointing True \
---output_dir "vision-tinyllama" \
+--output_dir "vision-mistral" \
 --use_flash_attention2 True \
 --block_size 8192
