@@ -25,13 +25,11 @@ from typing import Optional
 import torch
 import datasets
 import evaluate
-import torch
 from datasets import load_dataset
 import librosa
 import transformers
 from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
+    AutoProcessor,
     AutoTokenizer,
     HfArgumentParser,
     Trainer,
@@ -46,20 +44,13 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 import copy
-import torch
-from transformers import CLIPProcessor, CLIPModel, AutoTokenizer, AutoProcessor, CLIPConfig, LlamaConfig, WhisperConfig, WhisperModel, LlamaModel, LlamaTokenizer
-from transformers import AutoConfig, AutoModel
-from transformers import Trainer
 import argparse
 import random
 import numpy as np
 import json
 from collections.abc import Mapping
 from PIL import Image
-from tqdm import tqdm, trange
-import os
-from modeling_v2 import MM_LLMs, MM_LLMs_Config
-import torch
+from modeling_combine import MM_LLMs, MM_LLMs_Config
 from datasets import Audio
 from typing import Mapping, Union, List, Dict
 
@@ -96,11 +87,12 @@ class DataCollator():
 
         for index, feature in enumerate(features):
             local_index = index % (bs)
-            if feature['audios'] is not None:
+
+            if feature['audios_bool'][0] and feature['audios'] is not None:
                 batch['audio_index'] = torch.cat([batch['audio_index'], torch.tensor(
                     [local_index] * len(feature['audios']), dtype=torch.int)])
 
-            if feature['images'] is not None:
+            if feature['images_bool'][0] and feature['images'] is not None:
                 batch['image_index'] = torch.cat([batch['image_index'], torch.tensor(
                     [local_index] * len(feature['images']), dtype=torch.int)])
 
@@ -129,16 +121,31 @@ class DataCollator():
         batch['input_ids'] = input_ids['input_ids']
         batch['attention_mask'] = input_ids['attention_mask']
         batch['labels'] = input_ids['input_ids'].clone()
-        batch['labels'][batch['labels'] == 0] = -100
+        batch['labels'][batch['labels'] == self.tokenizer.pad_token_id] = -100
 
-        batch['image_starts'] = torch.tensor(
-            [self.tokenizer.convert_tokens_to_ids('<image>')] * bs, dtype=torch.int)
-        batch['image_ends'] = torch.tensor(
-            [self.tokenizer.convert_tokens_to_ids('</image>')] * bs, dtype=torch.int)
-        batch['audio_starts'] = torch.tensor(
-            [self.tokenizer.convert_tokens_to_ids('<audio>')] * bs, dtype=torch.int)
-        batch['audio_ends'] = torch.tensor(
-            [self.tokenizer.convert_tokens_to_ids('</audio>')] * bs, dtype=torch.int)
+        image_token = self.tokenizer.convert_tokens_to_ids('<image>')
+        image_end_token = self.tokenizer.convert_tokens_to_ids('</image>')
+        audio_token = self.tokenizer.convert_tokens_to_ids('<audio>')
+        audio_end_token = self.tokenizer.convert_tokens_to_ids('</audio>')
+
+        batch['image_starts'] = torch.tensor([image_token] * bs, dtype=torch.int)
+        batch['image_ends'] = torch.tensor([image_end_token] * bs, dtype=torch.int)
+        batch['audio_starts'] = torch.tensor([audio_token] * bs, dtype=torch.int)
+        batch['audio_ends'] = torch.tensor([audio_end_token] * bs, dtype=torch.int)
+
+        where_is = torch.where(
+            (batch['input_ids'] == image_token) | (
+                batch['input_ids'] == audio_token))
+        ls = []
+        for i in range(len(where_is[0])):
+            b, k = where_is[0][i], where_is[1][i]
+            l = int(batch['input_ids'][b, k])
+            ls.append(l)
+
+        ls = torch.tensor(ls)
+        batch['where_is_b'] = where_is[0]
+        batch['where_is_k'] = where_is[1]
+        batch['ls'] = ls
 
         return batch
 
@@ -304,8 +311,6 @@ def main():
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
-    tokenizer.add_bos_token = False
-    tokenizer.add_eos_token = False
     tokenizer.add_tokens(["<image>", "</image>", "<audio>", "</audio>"])
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
@@ -342,34 +347,20 @@ def main():
     if os.path.isdir(
             training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch.")
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
-
-    # load model
-    image_config = AutoConfig.from_pretrained(model_args.image_encoder_name_or_path)
-    audio_config = AutoConfig.from_pretrained(model_args.audio_encoder_name_or_path)
-    llm_config = AutoConfig.from_pretrained(model_args.model_name_or_path)
-
-    model_config = MM_LLMs_Config(
-        image_config=image_config,
-        audio_config=audio_config,
-        llm_config=llm_config)
 
     # load model separately
     model = MM_LLMs.from_pretrained(
         model_args.model_name_or_path, flash_attention=True, dtype=torch.bfloat16,
     )
     print(model.llm)
+    print(model.audio_encoder)
+
+    image_processor = AutoProcessor.from_pretrained(model_args.image_encoder_name_or_path)
+    default_height = image_processor.image_processor.size['height']
+    audio_processor = AutoProcessor.from_pretrained(model_args.audio_encoder_name_or_path)
 
     # freeze encoder model
     for param in model.image_encoder.parameters():
@@ -394,7 +385,6 @@ def main():
     _encodings['list_of_dict'] = ListOfDict
 
     class MMDataset(torch.utils.data.Dataset):
-
         def __init__(self, folder):
             if folder.endswith('.json'):
                 with open(folder) as fopen:
@@ -409,7 +399,9 @@ def main():
             try:
                 data = self.dataset[idx]
                 audio_list = []
+                audio_bool = []
                 image_list = []
+                image_bool = []
 
                 for x in data['filename']:
                     if x.endswith('.mp3'):
@@ -419,6 +411,7 @@ def main():
                             audio, sampling_rate=self.sr, return_tensors='pt')
 
                         audio_list.append(audio_features['input_features'])
+                        audio_bool.append(True)
 
                     elif x.endswith('.jpg'):
                         image = Image.open(x).convert('RGB')
@@ -427,6 +420,7 @@ def main():
                             images=image, return_tensors='pt')['pixel_values']
 
                         image_list.append(image_output)
+                        image_bool.append(True)
 
                 if not len(audio_list):
                     audio = np.zeros((self.sr * 10,))
@@ -435,6 +429,7 @@ def main():
                         audio, sampling_rate=self.sr, return_tensors='pt')
 
                     audio_list.append(audio_features['input_features'])
+                    audio_bool.append(False)
 
                 if not len(image_list):
                     image = np.zeros((3, default_height, default_height))
@@ -443,6 +438,7 @@ def main():
                         images=image, return_tensors='pt')['pixel_values']
 
                     image_list.append(image_output)
+                    image_bool.append(False)
 
                 full_text = tokenizer.apply_chat_template(data['conversations'], tokenize=False)
 
@@ -457,6 +453,8 @@ def main():
 
                 outputs['audios'] = torch.cat(audio_list, dim=0) if audio_list else None
                 outputs['images'] = torch.cat(image_list, dim=0) if image_list else None
+                outputs['audios_bool'] = audio_bool
+                outputs['images_bool'] = image_bool
 
                 return outputs
             except Exception as e:

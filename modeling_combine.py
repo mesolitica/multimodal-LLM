@@ -60,12 +60,6 @@ class MM_LLMs_Config(PretrainedConfig):
             llm_config["model_type"] = llm_config["model_type"] if "model_type" in llm_config else "llama"
             self.llm_config = CONFIG_MAPPING[llm_config["model_type"]](**llm_config)
 
-        self.hidden_size = max(
-            self.llm_config.hidden_size,
-            self.image_config.vision_config.hidden_size,
-            self.audio_config.d_model,
-        )
-
         super().__init__(**kwargs)
 
 
@@ -107,15 +101,23 @@ class MM_LLMs(PreTrainedModel):
     supports_gradient_checkpointing = True
     _supports_flash_attn_2 = True
 
-    def __init__(self, config):
+    def __init__(self, config, flash_attention=False, dtype=torch.float32):
         super().__init__(config)
         self.config = config
 
         self.image_encoder = AutoModel.from_config(config.image_config)
 
-        self.audio_encoder = AutoModel.from_config(config.audio_config)
+        self.audio_encoder = AutoModel.from_config(
+            config.audio_config,
+            use_flash_attention_2=flash_attention,
+            torch_dtype=dtype,
+        )
 
-        self.llm = AutoModelForCausalLM.from_config(config.llm_config)
+        self.llm = AutoModelForCausalLM.from_config(
+            config.llm_config,
+            use_flash_attention_2=flash_attention,
+            torch_dtype=dtype,
+        )
 
         self.image_projector = LlavaMultiModalProjector(
             config.image_config.vision_config.hidden_size,
@@ -146,12 +148,27 @@ class MM_LLMs(PreTrainedModel):
                 output_attentions: Optional[bool] = None,
                 output_hidden_states: Optional[bool] = None,
                 use_cache: Optional[bool] = None,
-                return_dict: Optional[bool] = None, **kwargs):
+                return_dict: Optional[bool] = None,
+                where_is_b=None,
+                where_is_k=None,
+                ls=None,
+                **kwargs):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         images = images.type(self.image_encoder.dtype) if images is not None else None
         audios = audios.type(self.audio_encoder.dtype) if audios is not None else None
+
+        print(
+            where_is_b,
+            where_is_k,
+            ls,
+            image_index,
+            audio_index,
+            input_ids.shape,
+            images.shape,
+            audios.shape,
+        )
 
         model_inputs = self.prepare_inputs_for_generation(
             input_ids=input_ids,
@@ -164,7 +181,10 @@ class MM_LLMs(PreTrainedModel):
             images=images,
             audios=audios,
             attention_mask=attention_mask,
-            labels=labels)
+            labels=labels,
+            where_is_b=where_is_b,
+            where_is_k=where_is_k,
+            ls=ls)
 
         outputs = self.llm(
             inputs_embeds=model_inputs['inputs_embeds'],
@@ -189,6 +209,9 @@ class MM_LLMs(PreTrainedModel):
             labels=None,
             audio_index=None,
             image_index=None,
+            where_is_b=None,
+            where_is_k=None,
+            ls=None,
             **kwargs):
 
         image_features = self.encode_image(
@@ -250,21 +273,20 @@ class MM_LLMs(PreTrainedModel):
         image_id = int(image_starts[0])
         audio_id = int(audio_starts[0])
 
-        where_is = torch.where((input_ids == audio_id) | (input_ids == image_id))
         positions = defaultdict(int)
         b_image = 0
         b_audio = 0
 
-        for i in range(len(where_is[0])):
-            b, k = where_is[0][i], where_is[1][i]
+        for i in range(len(where_is_b)):
+            b, k = where_is_b[i], where_is_k[i]
             int_b = int(b)
             int_k = int(k)
-            l = int(input_ids[b, k])
+            l = int(ls[i])
             if l == image_id:
-                f = image_features[b_image]
+                f = image_features[image_index[b_image]]
                 b_image += 1
             if l == audio_id:
-                f = audio_features[b_audio]
+                f = audio_features[audio_index[b_audio]]
                 b_audio += 1
 
             c = torch.cat([final_embedding[b, :int_k + 1 + positions[int_b]],
