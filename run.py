@@ -86,15 +86,14 @@ class DataCollator():
         batch['image_index'] = torch.tensor([], dtype=torch.int)
 
         for index, feature in enumerate(features):
-            local_index = index % (bs)
 
             if feature['audios_bool'][0] and feature['audios'] is not None:
                 batch['audio_index'] = torch.cat([batch['audio_index'], torch.tensor(
-                    [local_index] * len(feature['audios']), dtype=torch.int)])
+                    [index] * len(feature['audios']), dtype=torch.int)])
 
             if feature['images_bool'][0] and feature['images'] is not None:
                 batch['image_index'] = torch.cat([batch['image_index'], torch.tensor(
-                    [local_index] * len(feature['images']), dtype=torch.int)])
+                    [index] * len(feature['images']), dtype=torch.int)])
 
         for k, v in first.items():
 
@@ -103,6 +102,7 @@ class DataCollator():
                     "images",
                     "input_ids",
                     "attention_mask"
+
             ) and not isinstance(v, str):
                 if v is None:
                     batch[k] = None
@@ -398,10 +398,18 @@ def main():
         def __getitem__(self, idx):
             try:
                 data = self.dataset[idx]
-                audio_list = []
-                audio_bool = []
-                image_list = []
-                image_bool = []
+
+                audio = np.zeros((self.sr * 10,))
+                audio_features = audio_processor(audio, sampling_rate=self.sr, return_tensors='pt')
+                audio_list = [audio_features['input_features']]
+                audio_bool = [True]
+
+                image = np.zeros((3, default_height, default_height))
+
+                image_output = image_processor(
+                    images=image, return_tensors='pt')['pixel_values']
+                image_list = [image_output]
+                image_bool = [True]
 
                 for x in data['filename']:
                     if x.endswith('.mp3'):
@@ -422,25 +430,8 @@ def main():
                         image_list.append(image_output)
                         image_bool.append(True)
 
-                if not len(audio_list):
-                    audio = np.zeros((self.sr * 10,))
-
-                    audio_features = audio_processor(
-                        audio, sampling_rate=self.sr, return_tensors='pt')
-
-                    audio_list.append(audio_features['input_features'])
-                    audio_bool.append(False)
-
-                if not len(image_list):
-                    image = np.zeros((3, default_height, default_height))
-
-                    image_output = image_processor(
-                        images=image, return_tensors='pt')['pixel_values']
-
-                    image_list.append(image_output)
-                    image_bool.append(False)
-
                 full_text = tokenizer.apply_chat_template(data['conversations'], tokenize=False)
+                full_text = f'<image> <audio> {full_text}'
 
                 outputs = tokenizer(
                     full_text,
@@ -450,6 +441,16 @@ def main():
                     return_overflowing_tokens=False,
                     return_length=False
                 )
+
+                a = outputs['input_ids'][0]
+
+                if len(a[a == 32000]) != len(image_list):
+                    print('skip, len(a[a == 32000]) != len(image_list)')
+                    return
+
+                if len(a[a == 32002]) != len(audio_list):
+                    print('skip, len(a[a == 32002]) != len(audio_list)')
+                    return
 
                 outputs['audios'] = torch.cat(audio_list, dim=0) if audio_list else None
                 outputs['images'] = torch.cat(image_list, dim=0) if image_list else None

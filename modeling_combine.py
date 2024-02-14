@@ -302,6 +302,9 @@ class MM_LLMs(PreTrainedModel):
 
             positions[int_b] += len(f)
 
+        final_attention_mask[:, :seq_audio + seq_image + 2] = 0.0
+        final_labels[:, :seq_audio + seq_image + 2] = -100
+
         model_inputs = {
             "input_ids": input_ids,
             "inputs_embeds": final_embedding,
