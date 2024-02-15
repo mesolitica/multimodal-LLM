@@ -1,12 +1,12 @@
-WANDB_PROJECT=multimodal-mistral \
-deepspeed train.py \
+NCCL_SOCKET_IFNAME=eth0:120000 WANDB_PROJECT=multimodal-mistral \
+deepspeed run.py \
 --deepspeed ds_config_zero2.json \
---model_name_or_path mesolitica/malaysian-tinyllama-1.1b-16k-instructions-v3 \
+--model_name_or_path ./combine-mistral \
 --audio_encoder_name_or_path mesolitica/malaysian-whisper-small \
 --image_encoder_name_or_path google/siglip-base-patch16-384 \
---train_file mosaic-multimodal \
---per_device_train_batch_size 12 \
---gradient_accumulation_steps 1 \
+--train_file mosaic-multimodal-v2 \
+--per_device_train_batch_size 4 \
+--gradient_accumulation_steps 4 \
 --num_train_epochs 3 \
 --save_strategy "steps" \
 --save_steps 100 \

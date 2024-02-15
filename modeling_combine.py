@@ -212,6 +212,7 @@ class MM_LLMs(PreTrainedModel):
             where_is_b=None,
             where_is_k=None,
             ls=None,
+            inference=False,
             **kwargs):
 
         image_features = self.encode_image(
@@ -283,10 +284,10 @@ class MM_LLMs(PreTrainedModel):
             int_k = int(k)
             l = int(ls[i])
             if l == image_id:
-                f = image_features[image_index[b_image]]
+                f = image_features[b_image]
                 b_image += 1
             if l == audio_id:
-                f = audio_features[audio_index[b_audio]]
+                f = audio_features[b_audio]
                 b_audio += 1
 
             c = torch.cat([final_embedding[b, :int_k + 1 + positions[int_b]],
@@ -302,8 +303,11 @@ class MM_LLMs(PreTrainedModel):
 
             positions[int_b] += len(f)
 
-        final_attention_mask[:, :seq_audio + seq_image + 2] = 0.0
-        final_labels[:, :seq_audio + seq_image + 2] = -100
+        if not inference:
+            final_attention_mask[:, :seq_audio + seq_image + 2] = 0.0
+
+        if labels is not None:
+            final_labels[:, :seq_audio + seq_image + 2] = -100
 
         model_inputs = {
             "input_ids": input_ids,
